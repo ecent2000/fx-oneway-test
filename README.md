@@ -85,6 +85,8 @@ timestamp,askPrice,bidPrice,askVolume,bidVolume
 data\catalog\
 ```
 
+如果 `data/catalog/` 中已经存在覆盖当前策略所需 symbol、时间区间、数据类型和 bar 口径的可用 catalog，就不要重复构建。先复用已有文件并记录其覆盖范围；只有在缺少品种、缺少时间段、口径不一致或文件损坏时，才补充构建缺口。
+
 转换阶段要记录：
 
 - 数据源和下载时间
