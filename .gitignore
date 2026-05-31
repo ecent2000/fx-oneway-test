@@ -22,8 +22,17 @@ yarn-error.log*
 .env.*
 
 # Generated market data and reports
-data/
-reports/
+data/*
+!data/.gitkeep
+!data/raw/
+data/raw/*
+!data/raw/.gitkeep
+!data/catalog/
+data/catalog/*
+!data/catalog/.gitkeep
+
+reports/*
+!reports/.gitkeep
 ReportTester-*
 
 # MetaTrader compiled outputs
