@@ -48,6 +48,7 @@ def build_run_config(
     exit_z: float,
     stop_z: float,
     max_position_bars: int,
+    max_spread_points: int,
     trade_size: Decimal,
     starting_balance: str,
     chunk_size: int,
@@ -55,6 +56,7 @@ def build_run_config(
     default_leverage: float = 30.0,
     price_protection_points: int = 0,
     liquidity_consumption: bool = False,
+    include_quote_ticks: bool = False,
     report: bool = True,
 ) -> BacktestRunConfig:
     strategy = ImportableStrategyConfig(
@@ -69,6 +71,7 @@ def build_run_config(
             "exit_z": exit_z,
             "stop_z": stop_z,
             "max_position_bars": max_position_bars,
+            "max_spread_points": max_spread_points,
             "close_positions_on_stop": True,
         },
     )
@@ -99,30 +102,40 @@ def build_run_config(
         liquidity_consumption=liquidity_consumption,
     )
 
+    data: list[BacktestDataConfig] = []
     if data_kind == "bars":
-        data = BacktestDataConfig(
+        data.append(BacktestDataConfig(
             catalog_path=catalog.resolve().as_posix(),
             data_cls=Bar.fully_qualified_name(),
             bar_types=[bar_type],
             start_time=start,
             end_time=end,
             optimize_file_loading=True,
-        )
+        ))
+        if include_quote_ticks:
+            data.append(BacktestDataConfig(
+                catalog_path=catalog.resolve().as_posix(),
+                data_cls=QuoteTick.fully_qualified_name(),
+                instrument_id=instrument_id,
+                start_time=start,
+                end_time=end,
+                optimize_file_loading=True,
+            ))
     elif data_kind == "ticks":
-        data = BacktestDataConfig(
+        data.append(BacktestDataConfig(
             catalog_path=catalog.resolve().as_posix(),
             data_cls=QuoteTick.fully_qualified_name(),
             instrument_id=instrument_id,
             start_time=start,
             end_time=end,
             optimize_file_loading=True,
-        )
+        ))
     else:
         raise ValueError(f"Unsupported data_kind: {data_kind}")
 
     return BacktestRunConfig(
         venues=[venue],
-        data=[data],
+        data=data,
         engine=engine,
         chunk_size=chunk_size,
         raise_exception=True,
@@ -153,6 +166,7 @@ def run_backtest(
     exit_z: float,
     stop_z: float = 0.0,
     max_position_bars: int = 0,
+    max_spread_points: int = 0,
     trade_size: Decimal = Decimal("100000"),
     starting_balance: str = "1000000 USD",
     chunk_size: int = 100_000,
@@ -162,6 +176,7 @@ def run_backtest(
     default_leverage: float = 30.0,
     price_protection_points: int = 0,
     liquidity_consumption: bool = False,
+    include_quote_ticks: bool = False,
 ) -> dict[str, Any]:
     report_dir = reports_root.resolve() / f"{report_prefix}_{utc_stamp()}"
     if write_reports:
@@ -180,6 +195,7 @@ def run_backtest(
         exit_z=exit_z,
         stop_z=stop_z,
         max_position_bars=max_position_bars,
+        max_spread_points=max_spread_points,
         trade_size=trade_size,
         starting_balance=starting_balance,
         chunk_size=chunk_size,
@@ -187,6 +203,7 @@ def run_backtest(
         default_leverage=default_leverage,
         price_protection_points=price_protection_points,
         liquidity_consumption=liquidity_consumption,
+        include_quote_ticks=include_quote_ticks,
         report=write_reports,
     )
     node = BacktestNode(configs=[run_config])
@@ -220,11 +237,13 @@ def run_backtest(
             "exit_z": exit_z,
             "stop_z": stop_z,
             "max_position_bars": max_position_bars,
+            "max_spread_points": max_spread_points,
             "trade_size": str(trade_size),
             "starting_balance": starting_balance,
             "default_leverage": default_leverage,
             "price_protection_points": price_protection_points,
             "liquidity_consumption": liquidity_consumption,
+            "include_quote_ticks": include_quote_ticks,
         },
         "result": result_dict,
         "metrics": {

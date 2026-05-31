@@ -26,6 +26,7 @@ class RollingZScoreFxConfig(StrategyConfig, frozen=True):
     exit_z: float = 0.2
     stop_z: float = 0.0
     max_position_bars: int = 0
+    max_spread_points: int = 0
     close_positions_on_stop: bool = True
 
 
@@ -66,25 +67,50 @@ class RollingZScoreFxStrategy(Strategy):
         elif self.portfolio.is_net_long(instrument_id):
             self.position_bars += 1
             if z_score > -self.config.exit_z:
-                self.close_all_positions(instrument_id)
+                self.close_positions_if_ok()
             elif self.config.stop_z > 0.0 and z_score < -self.config.stop_z:
-                self.close_all_positions(instrument_id)
+                self.close_positions_if_ok()
             elif self.config.max_position_bars > 0 and self.position_bars >= self.config.max_position_bars:
-                self.close_all_positions(instrument_id)
+                self.close_positions_if_ok()
         elif self.portfolio.is_net_short(instrument_id):
             self.position_bars += 1
             if z_score < self.config.exit_z:
-                self.close_all_positions(instrument_id)
+                self.close_positions_if_ok()
             elif self.config.stop_z > 0.0 and z_score > self.config.stop_z:
-                self.close_all_positions(instrument_id)
+                self.close_positions_if_ok()
             elif self.config.max_position_bars > 0 and self.position_bars >= self.config.max_position_bars:
-                self.close_all_positions(instrument_id)
+                self.close_positions_if_ok()
 
     def buy(self) -> None:
+        if not self.trading_environment_ok():
+            return
         self.submit_order(self._market_order(OrderSide.BUY))
 
     def sell(self) -> None:
+        if not self.trading_environment_ok():
+            return
         self.submit_order(self._market_order(OrderSide.SELL))
+
+    def close_positions_if_ok(self) -> None:
+        if not self.trading_environment_ok():
+            return
+        self.close_all_positions(self.config.instrument_id)
+
+    def trading_environment_ok(self) -> bool:
+        if self.config.max_spread_points <= 0:
+            return True
+        assert self.instrument is not None
+
+        quote = self.cache.quote_tick(self.config.instrument_id)
+        if quote is None:
+            return False
+
+        point = self.instrument.price_increment.as_double()
+        if point <= 0.0:
+            return False
+
+        spread_points = (quote.ask_price.as_double() - quote.bid_price.as_double()) / point
+        return spread_points <= self.config.max_spread_points
 
     def _market_order(self, side: OrderSide) -> MarketOrder:
         assert self.instrument is not None
