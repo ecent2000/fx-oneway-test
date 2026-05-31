@@ -1,511 +1,292 @@
-# FX Oneway Factor Test
+# FX Factor Research Framework
 
-本流程用于快速走通一遍外汇因子策略生命周期：
+这个仓库保留为外汇因子策略从想法到执行验证的通用流程框架。
 
-```text
-FX QuoteTick 数据
--> ParquetDataCatalog
--> 自定义因子策略
--> 单次回测
--> 参数优化
--> 样本外验证
--> 成本/滑点压力测试
--> 生成完整 MT5 EA
--> MT5 Strategy Tester 回测 EA
--> MT5 demo/paper 执行验证
--> MT5 小资金实盘
-```
+以后只需要先给出一个因子策略思路，然后按本文档推进：先把想法写成可验证的策略规格，再依次完成数据、研究回测、稳健性验证、MT5 执行、demo/paper 和小资金实盘验证。
 
-第一遍目标不是找到完美 alpha，而是把完整工程链路闭环。
+## 使用方式
 
-## 第一遍策略目标
-
-- 标的：`EUR/USD`
-- 数据：Dukascopy bid/ask quote tick
-- 聚合周期：15 分钟 bar
-- 因子：滚动 z-score
-- 逻辑：价格偏离均值过多时做均值回归
-- 交易：市价单
-- 仓位：固定名义金额，例如 `100,000 EUR`
-- 成本：第一轮让 bid/ask spread 自然进入回测，后续再加手续费、滑点、延迟
-
-因子定义：
+给出新策略时，先尽量用下面格式描述。信息不完整也可以，缺口会在第 0 步补齐。
 
 ```text
-mid = (bid + ask) / 2
-factor = (mid_close - rolling_mean(mid_close, N)) / rolling_std(mid_close, N)
-
-factor < -entry_z: 做多 EUR/USD
-factor >  entry_z: 做空 EUR/USD
-abs(factor) < exit_z: 平仓
+策略名称：
+交易品种：
+数据频率：
+因子直觉：
+因子公式：
+做多条件：
+做空条件：
+平仓条件：
+止损/止盈/最大持仓：
+交易时段过滤：
+仓位方式：
+主要风险：
+希望验证的时间区间：
 ```
 
-## 推荐目录结构
+策略想法进入仓库后，所有代码、报告和 MT5 文件都应围绕一个明确的 `strategy_id` 组织，避免不同策略互相污染。
+
+## 目录约定
 
 ```text
 project-root\
   data\
-    raw\
-      <symbol>\
-    catalog\
-  reports\
-  scripts\
-    01_ingest_data.py
-    02_backtest.py
-    03_optimize.py
-    04_walk_forward.py
-  mt5\
-    <strategy_ea>.mq5
-  src\
-    <package>\
-      strategies\
-        <strategy>.py
-  README.md
+    raw\                  # 保留本地原始数据，不随清理删除
+    catalog\              # 保留本地 Nautilus catalog，不随清理删除
+  reports\                # 运行产物，默认不提交
+  scripts\                # 当前策略的研究、回测、优化、验证脚本
+  src\                    # 当前策略的 Python 包和可复用模块
+  mt5\                    # 当前策略的 MT5 EA、脚本和编译说明
+  README.md               # 通用流程标准
 ```
 
-具体文件名可以按项目习惯调整，但建议保留数据、研究、报告和 MT5 执行代码的边界。
+`data/` 是长期资产，清理仓库时不要删除。`reports/`、`__pycache__/`、`.ex5`、Strategy Tester 导出文件和一次性日志都属于运行产物，默认不提交。
 
-## 环境初始化
+## 0. 策略规格化
 
-```powershell
-cd <project-root>
+把策略想法转成可执行规格，至少确认：
 
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+- `strategy_id`：短横线命名，例如 `asian-session-breakout`
+- 标的和 symbol 映射：例如 `EUR/USD`、`EUR/USD.SIM`、MT5 broker symbol
+- 数据口径：bid、ask、mid、bar close、bar open、tick 或外部 bar
+- 因子计算：输入字段、窗口、标准化方式、缺失值和 warmup
+- 交易状态机：入场、出场、反向信号、重复信号、最大持仓
+- 执行假设：市价单、限价单、点差过滤、滑点、手续费、延迟
+- 风控：仓位、杠杆、最大亏损、交易时段、异常停止
+- 验证区间：训练、验证、最终测试、walk-forward 窗口
 
-python -m pip install -U pip
-pip install -U nautilus_trader pandas numpy pyarrow
-```
+只有规格明确后才开始写代码。
 
-可视化依赖不是第一步必须项。需要画 equity curve、drawdown 或 tearsheet 时再装：
+## 1. 数据盘点
 
-```powershell
-pip install -U "nautilus_trader[visualization]"
-```
+检查 `data/raw/` 和 `data/catalog/` 是否已经覆盖策略需要的品种、时间区间和频率。
 
-验证 NautilusTrader 可导入：
-
-```powershell
-python -c "import nautilus_trader; print('nautilus ok')"
-```
-
-## 1. 下载 Dukascopy Tick 数据
-
-原始 tick 数据建议整理成按品种和日期分区的 daily 文件：
+原始 tick 数据推荐结构：
 
 ```text
 data\raw\<symbol>\YYYY-MM\<symbol>_tick_YYYY-MM-DD.csv
 ```
 
-这个目录作为后续 ingest 的标准输入位置。
-
-注意事项：
-
-- 脚本会跳过已经存在的非空 daily 文件。
-- 中断后直接重跑同一条命令即可续下。
-- 周六/周日 FX 闭市时可能返回空文件，需要显式处理。
-- 后续 ingest 只读取标准 raw 目录，不读取下载临时目录。
-
-Dukascopy tick CSV 字段通常为：
+标准 tick CSV 字段建议统一为：
 
 ```text
 timestamp,askPrice,bidPrice,askVolume,bidVolume
 ```
 
-## 2. 转换为 Nautilus Catalog
+如果数据已经存在，不重复下载；如果缺少数据，先补齐缺口，再进入研究。
 
-目标：
+## 2. Catalog 构建
 
-```text
-Daily tick CSV
--> Nautilus QuoteTick
--> ParquetDataCatalog
-```
+目标是把原始数据转换成 NautilusTrader 可读的 `ParquetDataCatalog`。
 
-建议第一轮只导入一个月数据，例如：
-
-```text
-2024-10-01 到 2024-11-01
-```
-
-跑通后再导入三个月、一年、三年。
-
-Nautilus 侧核心组件：
-
-- `QuoteTick`
-- `QuoteTickDataWrangler`
-- `ParquetDataCatalog`
-- `TestInstrumentProvider.default_fx_ccy("EUR/USD")`
-
-目标 catalog 路径：
+标准输出：
 
 ```text
 data\catalog\
 ```
 
-## 3. 实现 Rolling Z-Score 策略
+转换阶段要记录：
 
-策略结构：
+- 数据源和下载时间
+- symbol 映射
+- timezone 和 timestamp 口径
+- bid/ask/mid 生成规则
+- bar 聚合周期和 price type
+- 缺失日期、空文件、异常 spread
 
-- 继承 `Strategy`
-- 定义策略配置
-- `on_start()` 获取 instrument 并订阅 bar
-- `on_bar()` 更新窗口、计算 z-score、下单或平仓
-- `on_stop()` 取消订单、清理状态
+## 3. 策略实现
 
-策略伪代码：
+在 `src/` 中实现当前策略的 NautilusTrader `Strategy` 和 `StrategyConfig`。
 
-```python
-class StrategyExample(Strategy):
-    def on_start(self):
-        self.instrument = self.cache.instrument(self.config.instrument_id)
-        self.subscribe_bars(self.config.bar_type)
-        self.request_bars(self.config.bar_type)
+实现最低要求：
 
-    def on_bar(self, bar):
-        close = float(bar.close)
-        self.window.append(close)
+- `on_start()` 获取 instrument、订阅数据、初始化状态
+- `on_bar()` 或 `on_quote_tick()` 计算因子并驱动状态机
+- 独立封装下单、平仓、点差过滤和风控检查
+- `on_stop()` 取消订单并按配置处理未平仓
+- 参数全部放入 config，避免写死在策略逻辑里
 
-        if len(self.window) < self.config.lookback:
-            return
-
-        mean = np.mean(self.window)
-        std = np.std(self.window)
-        z = (close - mean) / std if std > 0 else 0.0
-
-        is_flat = self.portfolio.is_flat(self.config.instrument_id)
-        is_long = self.portfolio.is_net_long(self.config.instrument_id)
-        is_short = self.portfolio.is_net_short(self.config.instrument_id)
-
-        if is_flat and z < -self.config.entry_z:
-            self.buy_market()
-        elif is_flat and z > self.config.entry_z:
-            self.sell_market()
-        elif is_long and z > -self.config.exit_z:
-            self.close_position()
-        elif is_short and z < self.config.exit_z:
-            self.close_position()
-```
-
-第一版可以参考 Nautilus 官方 `ema_cross` 示例的订单创建方式，只替换信号逻辑。
+策略实现必须能被 `ImportableStrategyConfig` 加载。
 
 ## 4. 单次回测
 
-第一轮配置：
+先跑最小可解释区间，例如 1 个月或 3 个月。
+
+单次回测至少输出：
+
+- config 快照
+- orders
+- fills
+- positions
+- account
+- summary metrics
+- engine log
+
+第一轮只确认链路可运行、订单方向正确、没有重复开仓或漏平仓；不要急着优化收益。
+
+## 5. 参数优化
+
+第一版用 grid search 或少量手工候选参数。
+
+选择参数时优先看：
+
+- 相邻参数区域是否稳定
+- 交易次数是否足够
+- 收益是否集中在少数极端交易
+- 回撤和换手是否可接受
+- 成本敏感性是否过高
+
+不要只选训练集收益最高的一组。
+
+## 6. 样本外验证
+
+推荐拆分：
 
 ```text
-instrument_id: EUR/USD.SIM
-bar_type: EUR/USD.SIM-15-MINUTE-BID-INTERNAL
-lookback: 96
-entry_z: 1.5
-exit_z: 0.2
-trade_size: 100_000
-start_time: 2024-10-01T00:00:00Z
-end_time: 2024-11-01T00:00:00Z
+训练 / 优化：一段连续历史
+验证：      后续连续历史
+最终测试：  最后一段只运行一次
 ```
 
-使用 Nautilus high-level API：
+如果最终测试失败，记录失败原因。不要反复回到训练阶段把测试集调到好看。
 
-- `BacktestVenueConfig`
-- `BacktestDataConfig`
-- `ImportableStrategyConfig`
-- `BacktestRunConfig`
-- `BacktestNode`
+## 7. Walk-Forward
 
-## 5. 回测报告
-
-每次回测至少保存：
-
-- orders report
-- fills report
-- positions report
-- account report
-- PnL
-- Sharpe
-- Profit factor
-- Win rate
-- 最大回撤
-- equity curve
-- drawdown curve
-
-报告输出目录：
-
-```text
-reports\
-```
-
-## 6. 参数优化
-
-第一轮用 grid search，不先上复杂优化器：
-
-```text
-lookback: 48, 96, 192
-entry_z: 1.0, 1.5, 2.0
-exit_z: 0.0, 0.2, 0.5
-bar_period: 5m, 15m, 60m
-```
-
-流程：
-
-1. 固定训练区间，例如 `2024-01-01` 到 `2024-06-30`
-2. 为每组参数生成一个 `BacktestRunConfig`
-3. 用 `BacktestNode(configs=configs).run()`
-4. 汇总收益、回撤、Sharpe、交易次数
-5. 不选收益最高的，优先选附近参数都不差的稳定区域
-
-## 7. 样本外验证
-
-推荐切分：
-
-```text
-训练 / 优化：2024-01 到 2024-06
-验证：      2024-07 到 2024-09
-最终测试：  2024-10 到 2024-12
-```
-
-规则：
-
-- 优化时不看最终测试集。
-- 最终测试集只跑一次。
-- 如果测试集不行，不反复回去调参。
-- 记录失败原因，而不是硬调到赚钱。
-
-## 8. Walk-Forward
-
-滚动验证：
+滚动验证示例：
 
 ```text
 用 6 个月优化 -> 跑未来 1 个月
 窗口向前滚动 1 个月
-重复 12 次
+重复多轮
 ```
 
-输出：
+检查：
 
-- 每个窗口的最佳参数
-- 每个窗口的样本外收益
-- 参数是否稳定
-- 收益是否集中在少数月份
-- 换手和成本是否失控
+- 每个窗口的最佳参数是否稳定
+- 样本外收益是否连续
+- 回撤是否集中在某些行情
+- 成本、换手和持仓时间是否失控
 
-## 9. 成本和压力测试
+## 8. 成本和压力测试
 
-第一轮 quote tick 已经自然包含点差，因为买在 ask、卖在 bid。
+逐步加入真实执行约束：
 
-第二轮开始加入：
-
-- 手续费模型 `fee_model`
-- 滑点模型 `fill_model`
-- 延迟模型 `latency_model`
+- bid/ask spread
+- 手续费
+- 滑点
+- 延迟
 - `price_protection_points`
 - `liquidity_consumption`
-- spread 放大倍数
-- 不同杠杆
-- 不同交易时间过滤
+- spread 放大
+- 杠杆变化
+- 交易时段过滤
 
-## 10. 生成完整 MT5 EA
+策略只有在成本压力下仍有合理余量，才进入 MT5 实现。
 
-第 10 步开始，将研究阶段确定下来的策略逻辑实现为完整 MT5 EA。NautilusTrader 只负责研究、回测和压力测试；执行阶段由 MT5 负责。
+## 9. MT5 EA 实现
 
-EA 必须是可编译、可回测、可 demo 运行的完整版本，而不是只输出信号的半成品。第一版目标不是重新优化策略，而是复现研究阶段已经确定的交易逻辑。
+MT5 阶段目标是复现已经确定的策略逻辑，不在 EA 里重新发明策略。
 
-EA 至少需要覆盖：
+EA 最低要求：
 
-- 信号计算
-- 开仓和平仓
-- 仓位识别
-- 基础风控
-- 异常保护
-- 运行日志
+- 只在新 bar 或明确事件上触发
+- 支持 signal-only 和 allow-trading 两种模式
+- 单品种净持仓状态清晰
+- 开仓、平仓、拒单和错误都有日志
+- 对 symbol 不可用、spread 过大、bar 不完整、未知持仓等情况拒绝交易
+- 参数和研究阶段保持一一映射
 
-实现原则：
+## 10. MT5 Strategy Tester
 
-1. 只在新 bar 上计算信号，避免同一根 bar 重复触发。
-2. 默认支持只观察信号和允许交易两种运行模式。
-3. 下单逻辑先保持简单，优先支持单品种、单方向净持仓。
-4. 遇到 symbol 不可用、spread 异常、bar 不完整、已有未知持仓等情况时拒绝交易。
-5. EA 完成后必须先进入 MT5 Strategy Tester 回测，不直接上 demo。
+先在 Strategy Tester 里验证 EA：
 
-## 11. MT5 Strategy Tester 回测 EA
+1. 使用与研究阶段一致的 symbol、周期、参数和时间区间。
+2. 先 signal-only，检查信号方向和时间。
+3. 再 allow-trading，检查订单、持仓和平仓原因。
+4. 导出 HTML report、signal log、order log、error log。
+5. 与 NautilusTrader 输出做结构化对齐。
 
-完整 EA 生成后，先在 MT5 内用 Strategy Tester 回测 EA。这个阶段验证的是 EA 本身是否正确执行，而不是继续用 NautilusTrader 回测结果替代 MT5 回测。
-
-回测流程：
-
-1. 在 MT5 Strategy Tester 中选择 EA、symbol、周期和历史区间。
-2. 使用与研究阶段一致的核心策略参数。
-3. 第一轮只检查信号，不评估收益。
-4. 第二轮开启交易逻辑，检查开仓、平仓、持仓和订单记录。
-5. 导出 MT5 回测报告、交易明细和 EA 日志。
-6. 对比 NautilusTrader 和 MT5 的信号、交易次数、方向和持仓时长。
-
-允许存在 broker 历史数据和 Dukascopy 数据导致的轻微差异，但不能接受：
+不能接受：
 
 - 信号方向系统性相反
-- 信号大面积提前或滞后
 - 交易次数数量级不一致
-- EA 重复开仓、漏平仓、异常加仓
-- Strategy Tester 中出现未处理 error
+- 连续漏平仓或重复开仓
+- 未解释的大量 error
+- 风控口径在研究和 MT5 中明显不同
 
-MT5 回测通过后，才进入 demo/paper 执行验证。
+## 11. NautilusTrader 与 MT5 对齐
 
-## 12. NautilusTrader 与 MT5 对齐复核
+对齐输入：
 
-进入 demo/paper 前，先把 NautilusTrader 研究结果和 MT5 Strategy Tester 的 EA 输出做一次结构化对齐。这个步骤的目标不是让两边收益完全一致，而是确认策略状态机、信号方向、开平仓节奏和执行风控没有系统性偏差。
-
-对齐输入至少包括：
-
-- NautilusTrader catalog 或回测报告目录
-- MT5 EA signal log
-- MT5 EA order log
-- MT5 EA error log
+- NautilusTrader catalog 或回测报告
+- MT5 signal log
+- MT5 order log
+- MT5 error log
 - MT5 Strategy Tester HTML report
-- 完全一致的策略参数：symbol 映射、周期、lookback、entry_z、exit_z、stop_z、max_position_bars
+- 完全一致的策略参数
 
-第一步先对齐信号层。建议在 MT5 EA 中每根已完成 bar 输出 `timestamp`、`close`、`mean`、`std`、`z_score`、`signal`、`position_before`、`position_after` 和 `spread_points`。NautilusTrader 侧用相同 bar_type、相同 rolling window 和相同状态机重新生成信号，然后按时间戳 join。
+对齐检查：
 
-示例命令：
+- bar timestamp 口径是否一致
+- price、factor、signal 是否接近
+- 状态机信号是否一致
+- 开平仓数量和方向是否一致
+- 未匹配订单是否可解释
 
-```powershell
-python .\scripts\08_align_mt5_nautilus_signals.py `
-  --mt5-signal-log "<mt5_common_files>\rolling_zscore_signal_log_<run_id>.csv" `
-  --mt5-order-log "<mt5_common_files>\rolling_zscore_order_log_<run_id>.csv" `
-  --mt5-error-log "<mt5_common_files>\rolling_zscore_error_log_<run_id>.csv" `
-  --catalog .\data\catalog `
-  --bar-type EUR/USD.SIM-15-MINUTE-BID-EXTERNAL `
-  --start 2023-01-01T00:00:00Z `
-  --end 2026-01-01T00:00:00Z `
-  --lookback 96 `
-  --entry-z 1.5 `
-  --exit-z 0.2 `
-  --stop-z 0.0 `
-  --max-position-bars 0 `
-  --out-dir .\reports\align_mt5_nautilus_latest
-```
+对齐报告至少保存到 `reports/<strategy_id>/alignment/`。
 
-信号层重点检查：
+## 12. Demo / Paper
 
-- `best_offset_minutes` 是否稳定，避免 bar open time / close time 口径错位。
-- `close_mae`、`z_mae` 和 `z_corr` 是否显示两边价格和 z-score 口径接近。
-- `raw_entry_match_rate` 是否说明入场阈值区域一致。
-- `state_signal_match_rate` 和 `state_non_hold_match_rate` 是否说明状态机一致。
-- `state_signal_mismatches.csv` 中是否存在成片的方向相反、提前或滞后。
-
-第二步再对齐订单层。NautilusTrader 回测需要加载能够支持成交的 QuoteTick，并启用和 MT5 一致的交易风控，例如最大点差过滤：
-
-```powershell
-python .\scripts\02_backtest.py `
-  --catalog .\data\catalog `
-  --bar-type EUR/USD.SIM-15-MINUTE-BID-EXTERNAL `
-  --data-kind bars `
-  --include-quote-ticks `
-  --start 2023-01-01T00:00:00Z `
-  --end 2026-01-01T00:00:00Z `
-  --lookback 96 `
-  --entry-z 1.5 `
-  --exit-z 0.2 `
-  --max-spread-points 30
-```
-
-订单层重点检查：
-
-- MT5 成功订单数、失败订单数和 NautilusTrader 订单数是否接近。
-- 按 `ENTER_LONG`、`ENTER_SHORT`、`EXIT_LONG_*`、`EXIT_SHORT_*` 分组后的数量是否接近。
-- 严格时间窗口内的开平仓匹配率是否足够高。
-- 放宽时间窗口后匹配率是否明显上升，用来识别成交延迟或 bar 时间口径差异。
-- 未匹配订单是否集中在点差过大、订单被拒、交易时段差异、broker 报价跳动或阈值边界附近。
-
-判断标准：
-
-- 可以接受：broker 历史数据和 Dukascopy 数据源不同导致的少量阈值边界差异。
-- 可以接受：MT5 tester 秒级成交时间和 NautilusTrader 事件时间不同导致的小窗口错位。
-- 需要修复：方向系统性相反、订单数量数量级不一致、连续漏平仓、重复开仓、持仓状态不同步。
-- 需要修复：MT5 error log 中出现大量未解释的交易错误。
-- 需要修复：点差、交易权限、未知持仓、bar 不完整等风控在两边口径不同。
-
-对齐报告至少保存：
-
-- `summary.json`
-- `offset_candidates.csv`
-- `matched_bars.csv`
-- `worst_z_diffs.csv`
-- `state_signal_mismatches.csv`
-- `unmatched_nautilus_orders.csv`
-- `unmatched_mt5_orders.csv`
-
-只有当信号层基本一致、订单层差异可以解释，并且 MT5 error log 没有未处理的系统性错误时，才进入 demo/paper 执行验证。
-
-## 13. MT5 Demo / Paper 执行验证
-
-MT5 回测通过后，再进入 demo/paper 执行验证。
+MT5 回测和对齐通过后，进入 demo/paper。
 
 流程：
 
-1. 在 demo/paper 账户中加载已经通过 Strategy Tester 的 EA。
-2. 第一阶段只观察实时信号，不下单。
-3. 第二阶段打开小仓位 demo 下单。
-4. 保存信号、订单、成交、持仓和平仓原因。
+1. 第一阶段只观察信号，不下单。
+2. 第二阶段打开小仓位 demo 下单。
+3. 保存信号、订单、成交、持仓、错误和平仓原因。
+4. 连续观察 2 到 4 周。
 
-观察 2 到 4 周：
+demo 阶段主要验证工程稳定性和成交假设，不根据短期收益反复调参。
 
-- 实时信号是否稳定
-- 订单和持仓是否正确
-- 成交、拒单、滑点是否被记录
-- 断线重连后状态是否正常
-- demo 成交质量是否明显劣于回测假设
+## 13. 小资金实盘
 
-MT5 demo 执行阶段的重点不是优化参数，而是验证：
+小资金实盘只调整运行风控，不改变策略核心逻辑。
 
-```text
-研究信号
-~= MT5 实时信号
-~= MT5 demo 成交后的真实持仓变化
-```
+必须具备：
 
-不要在 demo 阶段反复根据短期收益调参。demo 阶段主要排查工程问题、成交假设偏差和运行稳定性。
+- 最小可接受仓位
+- 每日最大亏损
+- 最大连续亏损停止
+- 最大持仓时间
+- 交易时段过滤
+- 连接和账户异常保护
+- 未知持仓处理
+- 手动干预流程
 
-实盘执行应该使用独立、可持续运行的 MT5 EA 或服务。
-
-## 14. MT5 小资金实盘
-
-小资金实盘不要改策略核心参数，只改风控和运行参数：
-
-- `demo` -> `live`
-- 仓位缩小到最小可接受规模
-- 加每日最大亏损
-- 加最大连续亏损停止
-- 加最大持仓时间
-- 加交易时段过滤
-- 加异常停止后自动平仓或人工确认机制
-- 加连接、账户、持仓异常时的保护逻辑
-- 禁止重复开仓或失控加仓
-
-第一阶段目标：
+目标是确认：
 
 ```text
-NautilusTrader 回测信号 ~= MT5 demo 信号 ~= MT5 live 信号
-NautilusTrader 成交假设 ~= MT5 demo 成交统计 ~= MT5 live 成交统计
+研究信号 ~= MT5 demo 信号 ~= MT5 live 信号
+研究成交假设 ~= MT5 demo 成交统计 ~= MT5 live 成交统计
 本地执行状态 ~= MT5 账户状态
 ```
 
-## 第一轮里程碑
+## 标准里程碑
 
-1. 下载 EUR/USD Dukascopy tick daily 数据
-2. 将 daily CSV 转成 Nautilus `ParquetDataCatalog`
-3. 跑通官方或最小 FX high-level backtest
-4. 替换成自定义策略
-5. 单月回测成功
-6. 三个月回测成功
-7. grid search 成功
-8. 样本外回测成功
-9. 成本压力测试成功
-10. 生成完整 MT5 EA
-11. MT5 EA 在 MetaEditor 编译成功
-12. MT5 Strategy Tester 回测通过
-13. MT5 EA 信号和 NautilusTrader 回测信号对齐
-14. MT5 demo 观察信号成功
-15. MT5 demo 小仓位下单成功
-16. MT5 demo 连续运行 2 周无状态错误
-17. MT5 小资金 live
+1. 策略规格化完成
+2. 数据覆盖确认
+3. Catalog 可用
+4. NautilusTrader 策略实现
+5. 单次回测通过
+6. 参数优化完成
+7. 样本外验证完成
+8. Walk-forward 完成
+9. 成本和压力测试完成
+10. MT5 EA 编译通过
+11. MT5 Strategy Tester 通过
+12. NautilusTrader 与 MT5 对齐通过
+13. Demo signal-only 观察通过
+14. Demo 小仓位交易通过
+15. 小资金实盘准备完成
 
-最短路线：先别追求 alpha，先追求流程闭环。
+最短路线：先闭环，再优化。每个新因子策略都从规格化开始，所有阶段都留下可复核产物。

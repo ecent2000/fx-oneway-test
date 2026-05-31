@@ -24,6 +24,7 @@ yarn-error.log*
 # Generated market data and reports
 data/
 reports/
+ReportTester-*
 
 # MetaTrader compiled outputs
 *.ex5
