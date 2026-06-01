@@ -5,6 +5,8 @@ from dataclasses import asdict
 from datetime import UTC
 from datetime import datetime
 from decimal import Decimal
+from math import inf
+from math import nan
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +54,8 @@ def default_params() -> dict[str, Any]:
         "breakout_lookback": 48,
         "short_ma_lookback": 16,
         "confirm_bars": 4,
+        "long_confirm_bars": 4,
+        "short_confirm_bars": 4,
         "bull_threshold": 0.03,
         "bear_threshold": 0.03,
         "flat_threshold": 0.01,
@@ -63,23 +67,89 @@ def default_params() -> dict[str, Any]:
         "lower_third": 0.33,
         "upper_third": 0.67,
         "stop_atr_mult": 2.0,
+        "long_stop_atr_mult": 1.5,
+        "short_stop_atr_mult": 1.5,
         "max_position_bars": 96,
         "max_spread_points": 0,
         "cooldown_bars": 4,
         "min_regime_bars": 2,
         "min_target_atr_mult": 0.8,
+        "long_min_target_atr_mult": 0.8,
+        "short_min_target_atr_mult": 0.8,
         "min_target_spread_mult": 0.0,
         "assumed_spread_points": 10,
         "trade_direction": "long_short",
-        "strict_long_filter": True,
+        "strict_long_filter": False,
         "strict_long_trend_mult": 1.5,
         "disable_wide_range_longs": False,
         "range_breakout_buffer_atr": 0.1,
         "range_structure_filter": True,
         "range_structure_lookback": 3,
-        "disabled_entry_regimes": "narrow_bear",
-        "entry_hours_utc": "12-15",
+        "disabled_entry_regimes": "",
+        "entry_hours_utc": "",
+        "long_enabled_regimes": "wide_bull",
+        "short_enabled_regimes": "wide_bear",
+        "long_entry_hours_utc": "6-8",
+        "short_entry_hours_utc": "13-15",
     }
+
+
+def pnl_to_float(value: object) -> float:
+    text = str(value).replace("USD", "").strip()
+    return float(text) if text else 0.0
+
+
+def profit_factor(values: pd.Series) -> float:
+    gross_profit = float(values[values > 0.0].sum())
+    gross_loss = float(-values[values < 0.0].sum())
+    if gross_loss == 0.0:
+        return inf if gross_profit > 0.0 else nan
+    return gross_profit / gross_loss
+
+
+def max_drawdown(values: pd.Series) -> float:
+    if values.empty:
+        return nan
+    equity = pd.concat([pd.Series([0.0]), values.reset_index(drop=True).cumsum()], ignore_index=True)
+    drawdown = equity - equity.cummax()
+    return float(drawdown.min())
+
+
+def side_position_metrics(positions: pd.DataFrame | None) -> dict[str, dict[str, Any]]:
+    empty = {
+        "trades": 0,
+        "pnl_usd": 0.0,
+        "gross_profit_usd": 0.0,
+        "gross_loss_usd": 0.0,
+        "win_rate": nan,
+        "profit_factor": nan,
+        "max_drawdown_usd": nan,
+    }
+    metrics = {
+        "long": dict(empty),
+        "short": dict(empty),
+    }
+    if positions is None or positions.empty:
+        return metrics
+
+    frame = positions.copy()
+    frame["pnl_usd"] = frame["realized_pnl"].map(pnl_to_float)
+    frame["ts_closed"] = pd.to_datetime(frame["ts_closed"], utc=True)
+    for side_name, entry in {"long": "BUY", "short": "SELL"}.items():
+        side = frame[frame["entry"].str.upper() == entry].sort_values("ts_closed")
+        if side.empty:
+            continue
+        values = side["pnl_usd"]
+        metrics[side_name] = {
+            "trades": int(len(side)),
+            "pnl_usd": float(values.sum()),
+            "gross_profit_usd": float(values[values > 0.0].sum()),
+            "gross_loss_usd": float(-values[values < 0.0].sum()),
+            "win_rate": float((values > 0.0).mean()),
+            "profit_factor": profit_factor(values),
+            "max_drawdown_usd": max_drawdown(values),
+        }
+    return metrics
 
 
 def build_run_config(
@@ -317,6 +387,7 @@ def run_regime_backtest(
             "positions": result.total_positions,
             "iterations": result.iterations,
         },
+        "side_metrics": side_position_metrics(positions),
         "reports": {
             "dir": str(report_dir),
             "orders": str(report_dir / "orders.csv"),

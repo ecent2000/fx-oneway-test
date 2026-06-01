@@ -25,6 +25,10 @@ REGIME_WIDE_RANGE = "wide_range"
 REGIME_WIDE_BEAR = "wide_bear"
 REGIME_NARROW_BEAR = "narrow_bear"
 
+LONG_ENTRY_REGIMES = frozenset({REGIME_NARROW_BULL, REGIME_WIDE_BULL, REGIME_WIDE_RANGE})
+SHORT_ENTRY_REGIMES = frozenset({REGIME_WIDE_RANGE, REGIME_WIDE_BEAR, REGIME_NARROW_BEAR})
+ALL_ENTRY_REGIMES = LONG_ENTRY_REGIMES | SHORT_ENTRY_REGIMES
+
 
 class RegimeAdaptiveFxConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
@@ -37,6 +41,8 @@ class RegimeAdaptiveFxConfig(StrategyConfig, frozen=True):
     breakout_lookback: PositiveInt = 48
     short_ma_lookback: PositiveInt = 16
     confirm_bars: PositiveInt = 4
+    long_confirm_bars: int = 4
+    short_confirm_bars: int = 4
     bull_threshold: PositiveFloat = 0.03
     bear_threshold: PositiveFloat = 0.03
     flat_threshold: PositiveFloat = 0.01
@@ -48,22 +54,30 @@ class RegimeAdaptiveFxConfig(StrategyConfig, frozen=True):
     lower_third: PositiveFloat = 0.33
     upper_third: PositiveFloat = 0.67
     stop_atr_mult: PositiveFloat = 2.0
+    long_stop_atr_mult: float = 1.5
+    short_stop_atr_mult: float = 1.5
     max_position_bars: int = 96
     max_spread_points: int = 0
     cooldown_bars: int = 4
     min_regime_bars: int = 2
     min_target_atr_mult: float = 0.8
+    long_min_target_atr_mult: float = 0.8
+    short_min_target_atr_mult: float = 0.8
     min_target_spread_mult: float = 0.0
     assumed_spread_points: int = 10
     trade_direction: str = "long_short"
-    strict_long_filter: bool = True
+    strict_long_filter: bool = False
     strict_long_trend_mult: float = 1.5
     disable_wide_range_longs: bool = False
     range_breakout_buffer_atr: float = 0.1
     range_structure_filter: bool = True
     range_structure_lookback: int = 3
-    disabled_entry_regimes: str = "narrow_bear"
-    entry_hours_utc: str = "12-15"
+    disabled_entry_regimes: str = ""
+    entry_hours_utc: str = ""
+    long_enabled_regimes: str = "wide_bull"
+    short_enabled_regimes: str = "wide_bear"
+    long_entry_hours_utc: str = "6-8"
+    short_entry_hours_utc: str = "13-15"
     close_positions_on_stop: bool = True
 
 
@@ -91,8 +105,14 @@ class RegimeAdaptiveFxStrategy(Strategy):
         self.entry_atr: float | None = None
         self.cooldown_bars_remaining: int = 0
         self.confirmed_regime_age: int = 0
+        self.confirmed_regime_observed_count: int = 0
         self.disabled_entry_regimes = self._parse_disabled_regimes(config.disabled_entry_regimes)
-        self.allowed_entry_hours_utc = self._parse_entry_hours(config.entry_hours_utc)
+        self.long_enabled_regimes = self._parse_enabled_regimes(config.long_enabled_regimes)
+        self.short_enabled_regimes = self._parse_enabled_regimes(config.short_enabled_regimes)
+        legacy_entry_hours_utc = self._parse_entry_hours(config.entry_hours_utc)
+        self.long_entry_hours_utc = self._resolve_entry_hours(config.long_entry_hours_utc, legacy_entry_hours_utc)
+        self.short_entry_hours_utc = self._resolve_entry_hours(config.short_entry_hours_utc, legacy_entry_hours_utc)
+        self.min_confirm_bars = min(self._confirm_bars_for(1), self._confirm_bars_for(-1))
 
     def on_start(self) -> None:
         self.instrument = self.cache.instrument(self.config.instrument_id)
@@ -223,58 +243,89 @@ class RegimeAdaptiveFxStrategy(Strategy):
             self.pending_regime_count = 1
 
         if (
-            self.pending_regime_count >= self.config.confirm_bars
+            self.pending_regime_count >= self.min_confirm_bars
             and raw_regime != self.confirmed_regime
         ):
             self.confirmed_regime = raw_regime
             self.confirmed_regime_age = 0
+            self.confirmed_regime_observed_count = self.pending_regime_count
             return True
         if raw_regime == self.confirmed_regime:
             self.confirmed_regime_age += 1
+            self.confirmed_regime_observed_count = max(
+                self.confirmed_regime_observed_count,
+                self.pending_regime_count,
+            )
         return False
 
     def _maybe_enter(self, close: float, factors: dict[str, float], ts_event: int) -> None:
         regime = self.confirmed_regime
         if regime is None or not self._entry_environment_ok():
             return
-        if regime in self.disabled_entry_regimes:
-            return
-        if not self._entry_time_ok(ts_event):
-            return
         if self.confirmed_regime_age < self.config.min_regime_bars:
             return
 
-        if regime == REGIME_NARROW_BULL and self._can_enter_long(factors) and (
+        if (
+            regime == REGIME_NARROW_BULL
+            and self._entry_filters_ok(1, regime, ts_event)
+            and self._can_enter_long(factors)
+            and (
             factors["momentum"] > self.config.momentum_entry or close > factors["prev_high"]
+            )
         ):
             if self._target_space_ok(1, factors):
                 self._enter_long(close, factors["atr"])
-        elif regime == REGIME_WIDE_BULL and self._can_enter_long(factors) and (
+        elif (
+            regime == REGIME_WIDE_BULL
+            and self._entry_filters_ok(1, regime, ts_event)
+            and self._can_enter_long(factors)
+            and (
             factors["range_pos"] <= self.config.pullback_buy_zone
             and factors["trend_slope"] > self.config.flat_threshold
+            )
         ):
             if self._target_space_ok(1, factors):
                 self._enter_long(close, factors["atr"])
-        elif regime == REGIME_WIDE_RANGE and self._can_enter_long(factors) and (
+        elif (
+            regime == REGIME_WIDE_RANGE
+            and self._entry_filters_ok(1, regime, ts_event)
+            and self._can_enter_long(factors)
+            and (
             factors["range_pos"] <= self.config.lower_third
             and self._range_long_ok(factors)
+            )
         ):
             if self._target_space_ok(1, factors):
                 self._enter_long(close, factors["atr"])
-        elif regime == REGIME_NARROW_BEAR and self._direction_allowed(-1) and (
+        elif (
+            regime == REGIME_NARROW_BEAR
+            and self._entry_filters_ok(-1, regime, ts_event)
+            and self._direction_allowed(-1)
+            and (
             factors["momentum"] < -self.config.momentum_entry or close < factors["prev_low"]
+            )
         ):
             if self._target_space_ok(-1, factors):
                 self._enter_short(close, factors["atr"])
-        elif regime == REGIME_WIDE_BEAR and self._direction_allowed(-1) and (
+        elif (
+            regime == REGIME_WIDE_BEAR
+            and self._entry_filters_ok(-1, regime, ts_event)
+            and self._direction_allowed(-1)
+            and (
             factors["range_pos"] >= self.config.pullback_sell_zone
             and factors["trend_slope"] < -self.config.flat_threshold
+            )
         ):
             if self._target_space_ok(-1, factors):
                 self._enter_short(close, factors["atr"])
-        elif regime == REGIME_WIDE_RANGE and self._direction_allowed(-1) and (
+        elif (
+            regime == REGIME_WIDE_RANGE
+            and self._entry_filters_ok(-1, regime, ts_event)
+            and self._direction_allowed(-1)
+            and (
             factors["range_pos"] >= self.config.upper_third
             and self._range_short_ok(factors)
+            )
         ):
             if self._target_space_ok(-1, factors):
                 self._enter_short(close, factors["atr"])
@@ -312,12 +363,12 @@ class RegimeAdaptiveFxStrategy(Strategy):
     def _hit_long_stop(self, close: float) -> bool:
         if self.entry_price is None or self.entry_atr is None:
             return False
-        return close <= self.entry_price - self.config.stop_atr_mult * self.entry_atr
+        return close <= self.entry_price - self._stop_atr_mult(1) * self.entry_atr
 
     def _hit_short_stop(self, close: float) -> bool:
         if self.entry_price is None or self.entry_atr is None:
             return False
-        return close >= self.entry_price + self.config.stop_atr_mult * self.entry_atr
+        return close >= self.entry_price + self._stop_atr_mult(-1) * self.entry_atr
 
     def _hit_max_position_bars(self) -> bool:
         return self.config.max_position_bars > 0 and self.position_bars >= self.config.max_position_bars
@@ -340,6 +391,20 @@ class RegimeAdaptiveFxStrategy(Strategy):
         regimes = {part.strip().lower() for part in value.split(",") if part.strip()}
         if "none" in regimes or "all_enabled" in regimes:
             return set()
+        return regimes
+
+    @staticmethod
+    def _parse_enabled_regimes(value: str) -> set[str] | None:
+        text = value.strip().lower()
+        if not text or text in {"all", "any", "all_enabled"}:
+            return None
+        if text == "none":
+            return set()
+
+        regimes = {part.strip().lower() for part in text.split(",") if part.strip()}
+        invalid_regimes = sorted(regimes - ALL_ENTRY_REGIMES)
+        if invalid_regimes:
+            raise ValueError(f"enabled_regimes contains unsupported regimes: {invalid_regimes}")
         return regimes
 
     @staticmethod
@@ -369,11 +434,59 @@ class RegimeAdaptiveFxStrategy(Strategy):
             raise ValueError(f"entry_hours_utc contains invalid hours: {invalid_hours}")
         return hours
 
-    def _entry_time_ok(self, ts_event: int) -> bool:
-        if self.allowed_entry_hours_utc is None:
+    def _resolve_entry_hours(self, value: str, fallback: set[int] | None) -> set[int] | None:
+        if value.strip():
+            return self._parse_entry_hours(value)
+        return fallback
+
+    def _entry_time_ok(self, direction: int, ts_event: int) -> bool:
+        allowed_hours = self.long_entry_hours_utc if direction > 0 else self.short_entry_hours_utc
+        if allowed_hours is None:
             return True
         hour = datetime.fromtimestamp(ts_event // 1_000_000_000, UTC).hour
-        return hour in self.allowed_entry_hours_utc
+        return hour in allowed_hours
+
+    def _entry_filters_ok(self, direction: int, regime: str, ts_event: int) -> bool:
+        return (
+            self._regime_entry_enabled(direction, regime)
+            and self._entry_time_ok(direction, ts_event)
+            and self._side_confirm_ok(direction)
+        )
+
+    def _regime_entry_enabled(self, direction: int, regime: str) -> bool:
+        if direction > 0:
+            enabled_regimes = self.long_enabled_regimes
+            fallback_regimes = LONG_ENTRY_REGIMES
+        else:
+            enabled_regimes = self.short_enabled_regimes
+            fallback_regimes = SHORT_ENTRY_REGIMES
+
+        if enabled_regimes is not None:
+            return regime in enabled_regimes
+        return regime in fallback_regimes and regime not in self.disabled_entry_regimes
+
+    def _side_confirm_ok(self, direction: int) -> bool:
+        if self.confirmed_regime is None:
+            return False
+        return self.confirmed_regime_observed_count >= self._confirm_bars_for(direction)
+
+    def _confirm_bars_for(self, direction: int) -> int:
+        configured = self.config.long_confirm_bars if direction > 0 else self.config.short_confirm_bars
+        if configured > 0:
+            return configured
+        return max(int(self.config.confirm_bars), 1)
+
+    def _stop_atr_mult(self, direction: int) -> float:
+        configured = self.config.long_stop_atr_mult if direction > 0 else self.config.short_stop_atr_mult
+        if configured > 0.0:
+            return configured
+        return self.config.stop_atr_mult
+
+    def _min_target_atr_mult(self, direction: int) -> float:
+        configured = self.config.long_min_target_atr_mult if direction > 0 else self.config.short_min_target_atr_mult
+        if configured >= 0.0:
+            return configured
+        return self.config.min_target_atr_mult
 
     def _can_enter_long(self, factors: dict[str, float]) -> bool:
         if not self._direction_allowed(1):
@@ -417,12 +530,13 @@ class RegimeAdaptiveFxStrategy(Strategy):
         return all(highs[i] > highs[i - 1] for i in range(1, len(highs)))
 
     def _target_space_ok(self, direction: int, factors: dict[str, float]) -> bool:
-        if self.config.min_target_atr_mult <= 0.0 and self.config.min_target_spread_mult <= 0.0:
+        min_target_atr_mult = self._min_target_atr_mult(direction)
+        if min_target_atr_mult <= 0.0 and self.config.min_target_spread_mult <= 0.0:
             return True
 
         target_distance = self._target_distance(direction, factors)
         min_distance = max(
-            self.config.min_target_atr_mult * factors["atr"],
+            min_target_atr_mult * factors["atr"],
             self.config.min_target_spread_mult * self._spread_price_estimate(),
         )
         return target_distance >= min_distance
@@ -519,3 +633,4 @@ class RegimeAdaptiveFxStrategy(Strategy):
         self.entry_atr = None
         self.cooldown_bars_remaining = 0
         self.confirmed_regime_age = 0
+        self.confirmed_regime_observed_count = 0

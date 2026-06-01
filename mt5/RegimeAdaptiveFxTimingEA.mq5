@@ -30,6 +30,8 @@ input int                    InpMomentumLookback = 24;
 input int                    InpBreakoutLookback = 48;
 input int                    InpShortMaLookback = 16;
 input int                    InpConfirmBars = 4;
+input int                    InpLongConfirmBars = 4;
+input int                    InpShortConfirmBars = 4;
 input double                 InpBullThreshold = 0.03;
 input double                 InpBearThreshold = 0.03;
 input double                 InpFlatThreshold = 0.01;
@@ -41,17 +43,25 @@ input double                 InpPullbackSellZone = 0.67;
 input double                 InpLowerThird = 0.33;
 input double                 InpUpperThird = 0.67;
 input double                 InpStopAtrMult = 2.0;
+input double                 InpLongStopAtrMult = 1.5;
+input double                 InpShortStopAtrMult = 1.5;
 input int                    InpMaxPositionBars = 96;
 input int                    InpCooldownBars = 4;
 input int                    InpMinRegimeBars = 2;
 input double                 InpMinTargetAtrMult = 0.8;
+input double                 InpLongMinTargetAtrMult = 0.8;
+input double                 InpShortMinTargetAtrMult = 0.8;
 input double                 InpMinTargetSpreadMult = 0.0;
 input int                    InpAssumedSpreadPoints = 10;
-input bool                   InpStrictLongFilter = true;
+input bool                   InpStrictLongFilter = false;
 input double                 InpStrictLongTrendMult = 1.5;
 input bool                   InpDisableWideRangeLongs = false;
-input string                 InpDisabledEntryRegimes = "narrow_bear";
-input string                 InpEntryHoursUtc = "12-15";
+input string                 InpDisabledEntryRegimes = "";
+input string                 InpEntryHoursUtc = "";
+input string                 InpLongEnabledRegimes = "wide_bull";
+input string                 InpShortEnabledRegimes = "wide_bear";
+input string                 InpLongEntryHoursUtc = "6-8";
+input string                 InpShortEntryHoursUtc = "13-15";
 input int                    InpEntryHourShiftHours = 0;
 input ENUM_SIGNAL_PRICE_MODE InpPriceMode = PRICE_BID_BAR_CLOSE;
 
@@ -114,6 +124,7 @@ ENUM_MARKET_REGIME g_confirmed_regime = REGIME_UNKNOWN;
 ENUM_MARKET_REGIME g_pending_regime = REGIME_UNKNOWN;
 int     g_pending_regime_count = 0;
 int     g_confirmed_regime_age = 0;
+int     g_confirmed_regime_observed_count = 0;
 double  g_live_entry_price = 0.0;
 double  g_live_entry_atr = 0.0;
 
@@ -189,9 +200,30 @@ bool EntryRegimeOk()
    return !StringContainsToken(text, RegimeToString(g_confirmed_regime));
 }
 
-bool EntryHourOk(const datetime bar_time)
+bool EnabledRegimeOk(string text)
 {
-   string text = InpEntryHoursUtc;
+   StringToLower(text);
+   StringTrimLeft(text);
+   StringTrimRight(text);
+   if(text == "" || text == "all" || text == "any" || text == "all_enabled")
+      return true;
+   if(text == "none")
+      return false;
+
+   return StringContainsToken(text, RegimeToString(g_confirmed_regime));
+}
+
+bool EntryRegimeOk(const int direction)
+{
+   if(direction > 0 && InpLongEnabledRegimes != "")
+      return EnabledRegimeOk(InpLongEnabledRegimes);
+   if(direction < 0 && InpShortEnabledRegimes != "")
+      return EnabledRegimeOk(InpShortEnabledRegimes);
+   return EntryRegimeOk();
+}
+
+bool EntryHourTextOk(string text, const datetime bar_time)
+{
    StringToLower(text);
    StringTrimLeft(text);
    StringTrimRight(text);
@@ -229,6 +261,46 @@ bool EntryHourOk(const datetime bar_time)
          return true;
    }
    return false;
+}
+
+bool EntryHourOk(const datetime bar_time)
+{
+   return EntryHourTextOk(InpEntryHoursUtc, bar_time);
+}
+
+bool EntryHourOk(const int direction, const datetime bar_time)
+{
+   if(direction > 0 && InpLongEntryHoursUtc != "")
+      return EntryHourTextOk(InpLongEntryHoursUtc, bar_time);
+   if(direction < 0 && InpShortEntryHoursUtc != "")
+      return EntryHourTextOk(InpShortEntryHoursUtc, bar_time);
+   return EntryHourOk(bar_time);
+}
+
+int ConfirmBarsFor(const int direction)
+{
+   const int configured = direction > 0 ? InpLongConfirmBars : InpShortConfirmBars;
+   if(configured > 0)
+      return configured;
+   return MathMax(InpConfirmBars, 1);
+}
+
+int MinConfirmBars()
+{
+   return MathMin(ConfirmBarsFor(1), ConfirmBarsFor(-1));
+}
+
+bool SideConfirmOk(const int direction)
+{
+   return g_confirmed_regime != REGIME_UNKNOWN &&
+          g_confirmed_regime_observed_count >= ConfirmBarsFor(direction);
+}
+
+bool EntryFiltersOk(const int direction, const datetime bar_time)
+{
+   return EntryRegimeOk(direction) &&
+          EntryHourOk(direction, bar_time) &&
+          SideConfirmOk(direction);
 }
 
 string RunModeToString()
@@ -674,15 +746,20 @@ bool ConfirmRegime(const ENUM_MARKET_REGIME raw_regime)
       g_pending_regime_count = 1;
    }
 
-   if(g_pending_regime_count >= InpConfirmBars && raw_regime != g_confirmed_regime)
+   if(g_pending_regime_count >= MinConfirmBars() && raw_regime != g_confirmed_regime)
    {
       g_confirmed_regime = raw_regime;
       g_confirmed_regime_age = 0;
+      g_confirmed_regime_observed_count = g_pending_regime_count;
       return true;
    }
 
    if(raw_regime == g_confirmed_regime)
+   {
       g_confirmed_regime_age++;
+      g_confirmed_regime_observed_count = MathMax(g_confirmed_regime_observed_count,
+                                                  g_pending_regime_count);
+   }
 
    return false;
 }
@@ -928,12 +1005,14 @@ bool ExecuteClose(const string signal, const PositionSnapshot &state)
 
 bool HitLongStop(const double close, const double entry_price, const double entry_atr)
 {
-   return entry_price > 0.0 && entry_atr > 0.0 && close <= entry_price - InpStopAtrMult * entry_atr;
+   const double stop_mult = InpLongStopAtrMult > 0.0 ? InpLongStopAtrMult : InpStopAtrMult;
+   return entry_price > 0.0 && entry_atr > 0.0 && close <= entry_price - stop_mult * entry_atr;
 }
 
 bool HitShortStop(const double close, const double entry_price, const double entry_atr)
 {
-   return entry_price > 0.0 && entry_atr > 0.0 && close >= entry_price + InpStopAtrMult * entry_atr;
+   const double stop_mult = InpShortStopAtrMult > 0.0 ? InpShortStopAtrMult : InpStopAtrMult;
+   return entry_price > 0.0 && entry_atr > 0.0 && close >= entry_price + stop_mult * entry_atr;
 }
 
 bool HitMaxPositionBars(const int position_bars)
@@ -972,10 +1051,16 @@ double TargetDistance(const int direction, const FactorSnapshot &factors)
 
 bool TargetSpaceOk(const int direction, const FactorSnapshot &factors)
 {
-   if(InpMinTargetAtrMult <= 0.0 && InpMinTargetSpreadMult <= 0.0)
+   double min_target_atr_mult = InpMinTargetAtrMult;
+   if(direction > 0 && InpLongMinTargetAtrMult >= 0.0)
+      min_target_atr_mult = InpLongMinTargetAtrMult;
+   else if(direction < 0 && InpShortMinTargetAtrMult >= 0.0)
+      min_target_atr_mult = InpShortMinTargetAtrMult;
+
+   if(min_target_atr_mult <= 0.0 && InpMinTargetSpreadMult <= 0.0)
       return true;
 
-   const double min_distance = MathMax(InpMinTargetAtrMult * factors.atr,
+   const double min_distance = MathMax(min_target_atr_mult * factors.atr,
                                        InpMinTargetSpreadMult * SpreadPriceEstimate());
    return TargetDistance(direction, factors) >= min_distance;
 }
@@ -1030,14 +1115,12 @@ int EntryDirection(const FactorSnapshot &factors, const datetime bar_time)
 {
    if(g_confirmed_regime_age < InpMinRegimeBars)
       return 0;
-   if(!EntryRegimeOk())
-      return 0;
-   if(!EntryHourOk(bar_time))
-      return 0;
 
    if(g_confirmed_regime == REGIME_NARROW_BULL &&
       (factors.momentum > InpMomentumEntry || factors.close > factors.prev_high))
    {
+      if(!EntryFiltersOk(1, bar_time))
+         return 0;
       if(!CanEnterLong(factors))
          return 0;
       if(!TargetSpaceOk(1, factors))
@@ -1048,6 +1131,8 @@ int EntryDirection(const FactorSnapshot &factors, const datetime bar_time)
       factors.range_pos <= InpPullbackBuyZone &&
       factors.trend_slope > InpFlatThreshold)
    {
+      if(!EntryFiltersOk(1, bar_time))
+         return 0;
       if(!CanEnterLong(factors))
          return 0;
       if(!TargetSpaceOk(1, factors))
@@ -1058,6 +1143,8 @@ int EntryDirection(const FactorSnapshot &factors, const datetime bar_time)
       factors.range_pos <= InpLowerThird &&
       factors.close >= factors.prev_low)
    {
+      if(!EntryFiltersOk(1, bar_time))
+         return 0;
       if(!CanEnterLong(factors))
          return 0;
       if(!TargetSpaceOk(1, factors))
@@ -1067,6 +1154,8 @@ int EntryDirection(const FactorSnapshot &factors, const datetime bar_time)
    if(g_confirmed_regime == REGIME_NARROW_BEAR &&
       (factors.momentum < -InpMomentumEntry || factors.close < factors.prev_low))
    {
+      if(!EntryFiltersOk(-1, bar_time))
+         return 0;
       if(!TargetSpaceOk(-1, factors))
          return 0;
       return -1;
@@ -1075,6 +1164,8 @@ int EntryDirection(const FactorSnapshot &factors, const datetime bar_time)
       factors.range_pos >= InpPullbackSellZone &&
       factors.trend_slope < -InpFlatThreshold)
    {
+      if(!EntryFiltersOk(-1, bar_time))
+         return 0;
       if(!TargetSpaceOk(-1, factors))
          return 0;
       return -1;
@@ -1083,6 +1174,8 @@ int EntryDirection(const FactorSnapshot &factors, const datetime bar_time)
       factors.range_pos >= InpUpperThird &&
       factors.close <= factors.prev_high)
    {
+      if(!EntryFiltersOk(-1, bar_time))
+         return 0;
       if(!TargetSpaceOk(-1, factors))
          return 0;
       return -1;
@@ -1090,9 +1183,8 @@ int EntryDirection(const FactorSnapshot &factors, const datetime bar_time)
    return 0;
 }
 
-bool ValidateHourFilter()
+bool ValidateHourFilterText(string text, const string name)
 {
-   string text = InpEntryHoursUtc;
    StringToLower(text);
    StringTrimLeft(text);
    StringTrimRight(text);
@@ -1116,7 +1208,7 @@ bool ValidateHourFilter()
          const int end_hour = (int)StringToInteger(StringSubstr(item, dash + 1));
          if(start_hour < 0 || start_hour > 23 || end_hour < 0 || end_hour > 23)
          {
-            PrintFormat("RegimeAdaptiveEA: invalid InpEntryHoursUtc range: %s", item);
+            PrintFormat("RegimeAdaptiveEA: invalid %s range: %s", name, item);
             return false;
          }
       }
@@ -1125,12 +1217,19 @@ bool ValidateHourFilter()
          const int hour = (int)StringToInteger(item);
          if(hour < 0 || hour > 23)
          {
-            PrintFormat("RegimeAdaptiveEA: invalid InpEntryHoursUtc hour: %s", item);
+            PrintFormat("RegimeAdaptiveEA: invalid %s hour: %s", name, item);
             return false;
          }
       }
    }
    return true;
+}
+
+bool ValidateHourFilter()
+{
+   return ValidateHourFilterText(InpEntryHoursUtc, "InpEntryHoursUtc") &&
+          ValidateHourFilterText(InpLongEntryHoursUtc, "InpLongEntryHoursUtc") &&
+          ValidateHourFilterText(InpShortEntryHoursUtc, "InpShortEntryHoursUtc");
 }
 
 int SignalOnlyPositionAfter(const string signal, const int position_before)
@@ -1319,6 +1418,11 @@ bool ValidateInputs()
       Print("RegimeAdaptiveEA: InpConfirmBars must be positive");
       return false;
    }
+   if(InpLongConfirmBars < 0 || InpShortConfirmBars < 0)
+   {
+      Print("RegimeAdaptiveEA: side confirm bars cannot be negative");
+      return false;
+   }
    if(InpCooldownBars < 0 || InpMinRegimeBars < 0)
    {
       Print("RegimeAdaptiveEA: cooldown and min regime bars cannot be negative");
@@ -1369,18 +1473,21 @@ int OnInit()
    g_pending_regime = REGIME_UNKNOWN;
    g_pending_regime_count = 0;
    g_confirmed_regime_age = 0;
+   g_confirmed_regime_observed_count = 0;
    g_live_entry_price = 0.0;
    g_live_entry_atr = 0.0;
    ConfigureLogFiles();
    PrepareLogs();
 
-   PrintFormat("RegimeAdaptiveEA initialized: symbol=%s timeframe=%s channel=%d atr=%d trend=%d confirm=%d mode=%s lots=%.2f magic=%I64u max_spread=%d price_mode=%s disabled_regimes=%s entry_hours_utc=%s entry_hour_shift=%d",
+   PrintFormat("RegimeAdaptiveEA initialized: symbol=%s timeframe=%s channel=%d atr=%d trend=%d confirm=%d long_confirm=%d short_confirm=%d mode=%s lots=%.2f magic=%I64u max_spread=%d price_mode=%s disabled_regimes=%s entry_hours_utc=%s long_regimes=%s short_regimes=%s long_hours_utc=%s short_hours_utc=%s entry_hour_shift=%d",
                g_symbol,
                TimeframeToString(InpTimeframe),
                InpChannelLookback,
                InpAtrLookback,
                InpTrendLookback,
                InpConfirmBars,
+               InpLongConfirmBars,
+               InpShortConfirmBars,
                RunModeToString(),
                InpLots,
                InpMagicNumber,
@@ -1388,6 +1495,10 @@ int OnInit()
                PriceModeToString(InpPriceMode),
                InpDisabledEntryRegimes,
                InpEntryHoursUtc,
+               InpLongEnabledRegimes,
+               InpShortEnabledRegimes,
+               InpLongEntryHoursUtc,
+               InpShortEntryHoursUtc,
                InpEntryHourShiftHours);
    PrintFormat("RegimeAdaptiveEA logs: folder=%s signal=%s order=%s error=%s",
                LogFolderDescription(),

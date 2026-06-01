@@ -28,6 +28,8 @@ def add_strategy_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--breakout-lookback", type=int, default=defaults["breakout_lookback"])
     parser.add_argument("--short-ma-lookback", type=int, default=defaults["short_ma_lookback"])
     parser.add_argument("--confirm-bars", type=int, default=defaults["confirm_bars"])
+    parser.add_argument("--long-confirm-bars", type=int, default=defaults["long_confirm_bars"])
+    parser.add_argument("--short-confirm-bars", type=int, default=defaults["short_confirm_bars"])
     parser.add_argument("--bull-threshold", type=float, default=defaults["bull_threshold"])
     parser.add_argument("--bear-threshold", type=float, default=defaults["bear_threshold"])
     parser.add_argument("--flat-threshold", type=float, default=defaults["flat_threshold"])
@@ -39,15 +41,21 @@ def add_strategy_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--lower-third", type=float, default=defaults["lower_third"])
     parser.add_argument("--upper-third", type=float, default=defaults["upper_third"])
     parser.add_argument("--stop-atr-mult", type=float, default=defaults["stop_atr_mult"])
+    parser.add_argument("--long-stop-atr-mult", type=float, default=defaults["long_stop_atr_mult"])
+    parser.add_argument("--short-stop-atr-mult", type=float, default=defaults["short_stop_atr_mult"])
     parser.add_argument("--max-position-bars", type=int, default=defaults["max_position_bars"])
     parser.add_argument("--max-spread-points", type=int, default=defaults["max_spread_points"])
     parser.add_argument("--cooldown-bars", type=int, default=defaults["cooldown_bars"])
     parser.add_argument("--min-regime-bars", type=int, default=defaults["min_regime_bars"])
     parser.add_argument("--min-target-atr-mult", type=float, default=defaults["min_target_atr_mult"])
+    parser.add_argument("--long-min-target-atr-mult", type=float, default=defaults["long_min_target_atr_mult"])
+    parser.add_argument("--short-min-target-atr-mult", type=float, default=defaults["short_min_target_atr_mult"])
     parser.add_argument("--min-target-spread-mult", type=float, default=defaults["min_target_spread_mult"])
     parser.add_argument("--assumed-spread-points", type=int, default=defaults["assumed_spread_points"])
     parser.add_argument("--trade-direction", choices=["long_short", "long_only", "short_only"], default=defaults["trade_direction"])
-    parser.add_argument("--strict-long-filter", action="store_true", default=defaults["strict_long_filter"])
+    parser.add_argument("--strict-long-filter", dest="strict_long_filter", action="store_true")
+    parser.add_argument("--no-strict-long-filter", dest="strict_long_filter", action="store_false")
+    parser.set_defaults(strict_long_filter=defaults["strict_long_filter"])
     parser.add_argument("--strict-long-trend-mult", type=float, default=defaults["strict_long_trend_mult"])
     parser.add_argument("--disable-wide-range-longs", action="store_true", default=defaults["disable_wide_range_longs"])
     parser.add_argument("--range-breakout-buffer-atr", type=float, default=defaults["range_breakout_buffer_atr"])
@@ -55,6 +63,10 @@ def add_strategy_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--range-structure-lookback", type=int, default=defaults["range_structure_lookback"])
     parser.add_argument("--disabled-entry-regimes", default=defaults["disabled_entry_regimes"])
     parser.add_argument("--entry-hours-utc", default=defaults["entry_hours_utc"])
+    parser.add_argument("--long-enabled-regimes", default=defaults["long_enabled_regimes"])
+    parser.add_argument("--short-enabled-regimes", default=defaults["short_enabled_regimes"])
+    parser.add_argument("--long-entry-hours-utc", default=defaults["long_entry_hours_utc"])
+    parser.add_argument("--short-entry-hours-utc", default=defaults["short_entry_hours_utc"])
 
 
 def params_from_args(args: argparse.Namespace) -> dict[str, Any]:
@@ -66,6 +78,8 @@ def params_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "breakout_lookback": args.breakout_lookback,
         "short_ma_lookback": args.short_ma_lookback,
         "confirm_bars": args.confirm_bars,
+        "long_confirm_bars": args.long_confirm_bars,
+        "short_confirm_bars": args.short_confirm_bars,
         "bull_threshold": args.bull_threshold,
         "bear_threshold": args.bear_threshold,
         "flat_threshold": args.flat_threshold,
@@ -77,11 +91,15 @@ def params_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "lower_third": args.lower_third,
         "upper_third": args.upper_third,
         "stop_atr_mult": args.stop_atr_mult,
+        "long_stop_atr_mult": args.long_stop_atr_mult,
+        "short_stop_atr_mult": args.short_stop_atr_mult,
         "max_position_bars": args.max_position_bars,
         "max_spread_points": args.max_spread_points,
         "cooldown_bars": args.cooldown_bars,
         "min_regime_bars": args.min_regime_bars,
         "min_target_atr_mult": args.min_target_atr_mult,
+        "long_min_target_atr_mult": args.long_min_target_atr_mult,
+        "short_min_target_atr_mult": args.short_min_target_atr_mult,
         "min_target_spread_mult": args.min_target_spread_mult,
         "assumed_spread_points": args.assumed_spread_points,
         "trade_direction": args.trade_direction,
@@ -93,6 +111,10 @@ def params_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "range_structure_lookback": args.range_structure_lookback,
         "disabled_entry_regimes": args.disabled_entry_regimes,
         "entry_hours_utc": args.entry_hours_utc,
+        "long_enabled_regimes": args.long_enabled_regimes,
+        "short_enabled_regimes": args.short_enabled_regimes,
+        "long_entry_hours_utc": args.long_entry_hours_utc,
+        "short_entry_hours_utc": args.short_entry_hours_utc,
     }
 
 
@@ -141,6 +163,15 @@ def main() -> None:
     print(f"win_rate:        {metrics['win_rate']}")
     print(f"sharpe:          {metrics['sharpe']}")
     print(f"profit_factor:   {metrics['profit_factor']}")
+    for side in ["long", "short"]:
+        side_metrics = summary["side_metrics"][side]
+        print(
+            f"{side}_metrics:   trades={side_metrics['trades']} "
+            f"pnl={side_metrics['pnl_usd']} "
+            f"win_rate={side_metrics['win_rate']} "
+            f"pf={side_metrics['profit_factor']} "
+            f"max_dd={side_metrics['max_drawdown_usd']}"
+        )
 
 
 if __name__ == "__main__":

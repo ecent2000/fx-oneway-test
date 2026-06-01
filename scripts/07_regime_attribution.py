@@ -45,6 +45,13 @@ SPLITS = {
 }
 
 
+def parse_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "y"}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Attribute regime-adaptive FX trades by regime and time buckets.")
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_PATH)
@@ -99,7 +106,7 @@ def load_params(args: argparse.Namespace) -> dict[str, Any]:
             continue
         value = row[key]
         if isinstance(current, bool):
-            params[key] = bool(value)
+            params[key] = parse_bool(value)
         elif isinstance(current, int):
             params[key] = int(value)
         elif isinstance(current, float):

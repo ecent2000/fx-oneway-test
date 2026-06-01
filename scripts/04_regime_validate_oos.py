@@ -37,6 +37,13 @@ SPLITS = {
 }
 
 
+def parse_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "y"}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run annual OOS checks for regime-adaptive FX timing.")
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_PATH)
@@ -62,7 +69,7 @@ def load_params(args: argparse.Namespace) -> dict[str, Any]:
             value = row[key]
             current = params[key]
             if isinstance(current, bool):
-                params[key] = bool(value)
+                params[key] = parse_bool(value)
             elif isinstance(current, int):
                 params[key] = int(value)
             elif isinstance(current, float):
@@ -70,6 +77,14 @@ def load_params(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 params[key] = value
     return params
+
+
+def flatten_side_metrics(summary: dict[str, Any]) -> dict[str, Any]:
+    metrics: dict[str, Any] = {}
+    for side in ["long", "short"]:
+        for key, value in summary["side_metrics"][side].items():
+            metrics[f"{side}_{key}"] = value
+    return metrics
 
 
 def main() -> None:
@@ -95,7 +110,16 @@ def main() -> None:
             report_prefix=split,
             write_reports=False,
         )
-        rows.append({"split": split, "start": start, "end": end, **params, **summary["metrics"]})
+        rows.append(
+            {
+                "split": split,
+                "start": start,
+                "end": end,
+                **params,
+                **summary["metrics"],
+                **flatten_side_metrics(summary),
+            }
+        )
         pd.DataFrame(rows).to_csv(out_dir / "oos_results.csv", index=False)
 
     results = pd.DataFrame(rows)
