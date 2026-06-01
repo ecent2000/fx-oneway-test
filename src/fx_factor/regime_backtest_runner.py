@@ -14,12 +14,21 @@ from nautilus_trader.config import BacktestDataConfig
 from nautilus_trader.config import BacktestEngineConfig
 from nautilus_trader.config import BacktestRunConfig
 from nautilus_trader.config import BacktestVenueConfig
+from nautilus_trader.config import FixedFeeModelConfig
+from nautilus_trader.config import FillModelConfig
+from nautilus_trader.config import ImportableFeeModelConfig
+from nautilus_trader.config import ImportableFillModelConfig
+from nautilus_trader.config import ImportableLatencyModelConfig
 from nautilus_trader.config import ImportableStrategyConfig
+from nautilus_trader.config import LatencyModelConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.config import RiskEngineConfig
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.identifiers import Venue
+
+
+REGIME_STRATEGY_ID = "regime-adaptive-fx-timing"
 
 
 def utc_stamp() -> str:
@@ -34,21 +43,54 @@ def bar_type_for(instrument_id: str, bar_minutes: int, price_type: str = "MID") 
     return f"{instrument_id}-{spec}-EXTERNAL"
 
 
+def default_params() -> dict[str, Any]:
+    return {
+        "channel_lookback": 96,
+        "atr_lookback": 48,
+        "trend_lookback": 96,
+        "momentum_lookback": 24,
+        "breakout_lookback": 48,
+        "short_ma_lookback": 16,
+        "confirm_bars": 4,
+        "bull_threshold": 0.03,
+        "bear_threshold": 0.03,
+        "flat_threshold": 0.01,
+        "narrow_width_threshold": 8.0,
+        "wide_range_threshold": 10.0,
+        "momentum_entry": 0.0003,
+        "pullback_buy_zone": 0.33,
+        "pullback_sell_zone": 0.67,
+        "lower_third": 0.33,
+        "upper_third": 0.67,
+        "stop_atr_mult": 2.0,
+        "max_position_bars": 96,
+        "max_spread_points": 0,
+        "cooldown_bars": 4,
+        "min_regime_bars": 2,
+        "min_target_atr_mult": 0.8,
+        "min_target_spread_mult": 0.0,
+        "assumed_spread_points": 10,
+        "trade_direction": "long_short",
+        "strict_long_filter": True,
+        "strict_long_trend_mult": 1.5,
+        "disable_wide_range_longs": False,
+        "range_breakout_buffer_atr": 0.1,
+        "range_structure_filter": True,
+        "range_structure_lookback": 3,
+        "disabled_entry_regimes": "narrow_bear",
+        "entry_hours_utc": "12-15",
+    }
+
+
 def build_run_config(
     *,
     catalog: Path,
     report_dir: Path,
     instrument_id: str,
     bar_type: str,
-    data_kind: str,
     start: str,
     end: str,
-    lookback: int,
-    entry_z: float,
-    exit_z: float,
-    stop_z: float,
-    max_position_bars: int,
-    max_spread_points: int,
+    params: dict[str, Any],
     trade_size: Decimal,
     starting_balance: str,
     chunk_size: int,
@@ -57,22 +99,22 @@ def build_run_config(
     price_protection_points: int = 0,
     liquidity_consumption: bool = False,
     include_quote_ticks: bool = False,
+    prob_slippage: float = 0.0,
+    random_seed: int | None = None,
+    commission: str | None = None,
+    base_latency_nanos: int = 0,
     report: bool = True,
 ) -> BacktestRunConfig:
+    strategy_params = {**default_params(), **params}
     strategy = ImportableStrategyConfig(
-        strategy_path="fx_factor.strategies.rolling_zscore_fx:RollingZScoreFxStrategy",
-        config_path="fx_factor.strategies.rolling_zscore_fx:RollingZScoreFxConfig",
+        strategy_path="fx_factor.strategies.regime_adaptive_fx:RegimeAdaptiveFxStrategy",
+        config_path="fx_factor.strategies.regime_adaptive_fx:RegimeAdaptiveFxConfig",
         config={
             "instrument_id": instrument_id,
             "bar_type": bar_type,
             "trade_size": str(trade_size),
-            "lookback": lookback,
-            "entry_z": entry_z,
-            "exit_z": exit_z,
-            "stop_z": stop_z,
-            "max_position_bars": max_position_bars,
-            "max_spread_points": max_spread_points,
             "close_positions_on_stop": True,
+            **strategy_params,
         },
     )
 
@@ -91,6 +133,33 @@ def build_run_config(
         run_analysis=True,
     )
 
+    fill_model = None
+    if prob_slippage > 0.0:
+        fill_model = ImportableFillModelConfig(
+            fill_model_path="nautilus_trader.backtest.models:FillModel",
+            config_path="nautilus_trader.config:FillModelConfig",
+            config=FillModelConfig(
+                prob_slippage=prob_slippage,
+                random_seed=random_seed,
+            ).dict(),
+        )
+
+    fee_model = None
+    if commission is not None:
+        fee_model = ImportableFeeModelConfig(
+            fee_model_path="nautilus_trader.backtest.models:FixedFeeModel",
+            config_path="nautilus_trader.config:FixedFeeModelConfig",
+            config=FixedFeeModelConfig(commission=commission).dict(),
+        )
+
+    latency_model = None
+    if base_latency_nanos > 0:
+        latency_model = ImportableLatencyModelConfig(
+            latency_model_path="nautilus_trader.backtest.models:LatencyModel",
+            config_path="nautilus_trader.config:LatencyModelConfig",
+            config=LatencyModelConfig(base_latency_nanos=base_latency_nanos).dict(),
+        )
+
     venue = BacktestVenueConfig(
         name="SIM",
         oms_type="NETTING",
@@ -98,40 +167,34 @@ def build_run_config(
         base_currency="USD",
         starting_balances=[starting_balance],
         default_leverage=default_leverage,
+        fill_model=fill_model,
+        fee_model=fee_model,
+        latency_model=latency_model,
         price_protection_points=price_protection_points,
         liquidity_consumption=liquidity_consumption,
     )
 
-    data: list[BacktestDataConfig] = []
-    if data_kind == "bars":
-        data.append(BacktestDataConfig(
+    data: list[BacktestDataConfig] = [
+        BacktestDataConfig(
             catalog_path=catalog.resolve().as_posix(),
             data_cls=Bar.fully_qualified_name(),
             bar_types=[bar_type],
             start_time=start,
             end_time=end,
             optimize_file_loading=True,
-        ))
-        if include_quote_ticks:
-            data.append(BacktestDataConfig(
+        ),
+    ]
+    if include_quote_ticks:
+        data.append(
+            BacktestDataConfig(
                 catalog_path=catalog.resolve().as_posix(),
                 data_cls=QuoteTick.fully_qualified_name(),
                 instrument_id=instrument_id,
                 start_time=start,
                 end_time=end,
                 optimize_file_loading=True,
-            ))
-    elif data_kind == "ticks":
-        data.append(BacktestDataConfig(
-            catalog_path=catalog.resolve().as_posix(),
-            data_cls=QuoteTick.fully_qualified_name(),
-            instrument_id=instrument_id,
-            start_time=start,
-            end_time=end,
-            optimize_file_loading=True,
-        ))
-    else:
-        raise ValueError(f"Unsupported data_kind: {data_kind}")
+            ),
+        )
 
     return BacktestRunConfig(
         venues=[venue],
@@ -152,21 +215,15 @@ def write_report(df: pd.DataFrame | None, path: Path) -> None:
         path.write_text("", encoding="utf-8")
 
 
-def run_backtest(
+def run_regime_backtest(
     *,
     catalog: Path,
     reports_root: Path,
     instrument_id: str,
     bar_type: str,
-    data_kind: str,
     start: str,
     end: str,
-    lookback: int,
-    entry_z: float,
-    exit_z: float,
-    stop_z: float = 0.0,
-    max_position_bars: int = 0,
-    max_spread_points: int = 0,
+    params: dict[str, Any] | None = None,
     trade_size: Decimal = Decimal("100000"),
     starting_balance: str = "1000000 USD",
     chunk_size: int = 100_000,
@@ -177,25 +234,24 @@ def run_backtest(
     price_protection_points: int = 0,
     liquidity_consumption: bool = False,
     include_quote_ticks: bool = False,
+    prob_slippage: float = 0.0,
+    random_seed: int | None = None,
+    commission: str | None = None,
+    base_latency_nanos: int = 0,
 ) -> dict[str, Any]:
-    report_dir = reports_root.resolve() / f"{report_prefix}_{utc_stamp()}"
+    report_dir = reports_root.resolve() / REGIME_STRATEGY_ID / f"{report_prefix}_{utc_stamp()}"
     if write_reports:
         report_dir.mkdir(parents=True, exist_ok=True)
 
+    merged_params = {**default_params(), **(params or {})}
     run_config = build_run_config(
         catalog=catalog,
         report_dir=report_dir,
         instrument_id=instrument_id,
         bar_type=bar_type,
-        data_kind=data_kind,
         start=start,
         end=end,
-        lookback=lookback,
-        entry_z=entry_z,
-        exit_z=exit_z,
-        stop_z=stop_z,
-        max_position_bars=max_position_bars,
-        max_spread_points=max_spread_points,
+        params=merged_params,
         trade_size=trade_size,
         starting_balance=starting_balance,
         chunk_size=chunk_size,
@@ -204,6 +260,10 @@ def run_backtest(
         price_protection_points=price_protection_points,
         liquidity_consumption=liquidity_consumption,
         include_quote_ticks=include_quote_ticks,
+        prob_slippage=prob_slippage,
+        random_seed=random_seed,
+        commission=commission,
+        base_latency_nanos=base_latency_nanos,
         report=write_reports,
     )
     node = BacktestNode(configs=[run_config])
@@ -225,25 +285,24 @@ def run_backtest(
     pnl_stats = result_dict.get("stats_pnls", {}).get("USD", {})
     return_stats = result_dict.get("stats_returns", {})
     summary: dict[str, Any] = {
+        "strategy_id": REGIME_STRATEGY_ID,
         "config": {
             "catalog": catalog.resolve().as_posix(),
             "instrument_id": instrument_id,
             "bar_type": bar_type,
-            "data_kind": data_kind,
             "start": start,
             "end": end,
-            "lookback": lookback,
-            "entry_z": entry_z,
-            "exit_z": exit_z,
-            "stop_z": stop_z,
-            "max_position_bars": max_position_bars,
-            "max_spread_points": max_spread_points,
+            "params": merged_params,
             "trade_size": str(trade_size),
             "starting_balance": starting_balance,
             "default_leverage": default_leverage,
             "price_protection_points": price_protection_points,
             "liquidity_consumption": liquidity_consumption,
             "include_quote_ticks": include_quote_ticks,
+            "prob_slippage": prob_slippage,
+            "random_seed": random_seed,
+            "commission": commission,
+            "base_latency_nanos": base_latency_nanos,
         },
         "result": result_dict,
         "metrics": {

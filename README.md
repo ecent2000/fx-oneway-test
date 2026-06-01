@@ -4,6 +4,27 @@
 
 以后只需要先给出一个因子策略思路，然后按本文档推进：先把想法写成可验证的策略规格，再依次完成数据、研究回测、稳健性验证、MT5 执行、demo/paper 和小资金实盘验证。
 
+## 当前策略
+
+当前仓库核心策略为 `regime-adaptive-fx-timing`。策略说明、默认参数、最新表现和复现命令见:
+
+```text
+docs/regime_adaptive_fx_timing.md
+```
+
+核心文件:
+
+```text
+src/fx_factor/strategies/regime_adaptive_fx.py
+src/fx_factor/regime_backtest_runner.py
+scripts/02_regime_backtest.py
+scripts/03d_regime_filter_scan.py
+scripts/04_regime_validate_oos.py
+scripts/06_regime_stress_test.py
+scripts/07_regime_attribution.py
+mt5/RegimeAdaptiveFxTimingEA.mq5
+```
+
 ## 使用方式
 
 给出新策略时，先尽量用下面格式描述。信息不完整也可以，缺口会在第 0 步补齐。
