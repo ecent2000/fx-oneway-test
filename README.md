@@ -22,6 +22,7 @@ scripts/03d_regime_filter_scan.py
 scripts/04_regime_validate_oos.py
 scripts/06_regime_stress_test.py
 scripts/07_regime_attribution.py
+scripts/08_visualize_backtest.py
 mt5/RegimeAdaptiveFxTimingEA.mq5
 ```
 
@@ -203,6 +204,35 @@ data\catalog\
 - spread 放大
 - 杠杆变化
 - 交易时段过滤
+
+回测可视化使用 [Lightweight Charts](https://github.com/tradingview/lightweight-charts)：
+
+- npm 包：`lightweight-charts`
+- 当前锁定版本：`5.2.0`
+- 许可证：`Apache-2.0`
+- 用途：生成高性能 K 线 + 回测成交标记图，适合查看多年月度/分钟级回测交易位置
+
+安装依赖：
+
+```powershell
+npm install
+```
+
+运行 NautilusTrader 回测后，使用标准可视化脚本生成交易图：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\08_visualize_backtest.py --report-dir <backtest-report-dir>
+```
+
+如果省略 `--report-dir`，脚本会默认查找 `reports/regime-adaptive-fx-timing/` 下最新的可用回测报告。
+
+输出文件：
+
+```text
+bars_with_fills_lwc.html    # Lightweight Charts 高性能K线成交图
+```
+
+`bars_with_fills_lwc.html` 从 `data/catalog` 读取完整 bar 数据，并叠加 `fills.csv` 中的成交点，避免长区间回测只显示 engine cache 末尾 K 线的问题。
 
 策略只有在成本压力下仍有合理余量，才进入 MT5 实现。
 
