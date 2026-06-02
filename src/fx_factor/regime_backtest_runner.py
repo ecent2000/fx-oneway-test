@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import plotly.graph_objects as go
+from nautilus_trader.analysis import create_tearsheet
 from nautilus_trader.backtest.node import BacktestNode
 from nautilus_trader.config import BacktestDataConfig
 from nautilus_trader.config import BacktestEngineConfig
@@ -28,6 +30,7 @@ from nautilus_trader.config import RiskEngineConfig
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.identifiers import Venue
+from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
 REGIME_STRATEGY_ID = "regime-adaptive-fx-timing"
@@ -285,6 +288,376 @@ def write_report(df: pd.DataFrame | None, path: Path) -> None:
         path.write_text("", encoding="utf-8")
 
 
+def bars_frame_from_catalog(catalog: Path, bar_type: str, start: str, end: str) -> pd.DataFrame:
+    data_catalog = ParquetDataCatalog(str(catalog.resolve()))
+    bars = data_catalog.bars(bar_types=[bar_type], start=start, end=end)
+    if not bars:
+        raise RuntimeError(f"No bars found in catalog for {bar_type} between {start} and {end}")
+
+    frame = pd.DataFrame(Bar.to_dict(bar) for bar in bars)
+    frame["ts_init"] = pd.to_datetime(frame["ts_init"], utc=True)
+    for column in ["open", "high", "low", "close"]:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    return frame.dropna(subset=["open", "high", "low", "close"]).sort_values("ts_init")
+
+
+def aggregate_fills(fills: pd.DataFrame | None, instrument_id: str) -> pd.DataFrame:
+    if fills is None or fills.empty:
+        return pd.DataFrame(columns=["ts_init", "order_side", "last_qty", "last_px"])
+
+    frame = fills[fills["instrument_id"] == instrument_id].copy()
+    if frame.empty:
+        return pd.DataFrame(columns=["ts_init", "order_side", "last_qty", "last_px"])
+
+    frame["ts_init"] = pd.to_datetime(frame["ts_init"], utc=True)
+    frame["last_qty"] = pd.to_numeric(frame["last_qty"], errors="coerce")
+    frame["last_px"] = pd.to_numeric(frame["last_px"], errors="coerce")
+    frame = frame.dropna(subset=["ts_init", "last_qty", "last_px", "order_side"])
+    if frame.empty:
+        return pd.DataFrame(columns=["ts_init", "order_side", "last_qty", "last_px"])
+
+    def weighted_fill(group: pd.DataFrame) -> pd.Series:
+        quantity = float(group["last_qty"].sum())
+        if quantity <= 0.0:
+            price = float(group["last_px"].mean())
+        else:
+            price = float((group["last_px"] * group["last_qty"]).sum() / quantity)
+        return pd.Series({"last_qty": quantity, "last_px": price})
+
+    return (
+        frame.groupby(["ts_init", "order_side"], as_index=False, dropna=False)
+        .apply(weighted_fill, include_groups=False)
+        .sort_values("ts_init")
+    )
+
+
+def write_bars_with_fills_chart(
+    *,
+    catalog: Path,
+    report_dir: Path,
+    instrument_id: str,
+    bar_type: str,
+    start: str,
+    end: str,
+    fills: pd.DataFrame | None,
+) -> str:
+    bars = bars_frame_from_catalog(catalog, bar_type, start, end)
+    fill_points = aggregate_fills(fills, instrument_id)
+    output_path = report_dir / "bars_with_fills.html"
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Candlestick(
+            x=bars["ts_init"],
+            open=bars["open"],
+            high=bars["high"],
+            low=bars["low"],
+            close=bars["close"],
+            name="15m bars",
+            increasing_line_color="#1f7a3a",
+            decreasing_line_color="#c7362f",
+        ),
+    )
+
+    marker_specs = {
+        "BUY": ("Buy fills", "triangle-up", "#2ca24d"),
+        "SELL": ("Sell fills", "triangle-down", "#d6423a"),
+    }
+    for side, (name, symbol, color) in marker_specs.items():
+        side_points = fill_points[fill_points["order_side"].str.upper() == side]
+        if side_points.empty:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=side_points["ts_init"],
+                y=side_points["last_px"],
+                mode="markers",
+                name=name,
+                marker={
+                    "symbol": symbol,
+                    "size": 10,
+                    "color": color,
+                    "line": {"color": "#111111", "width": 1.5},
+                },
+                customdata=side_points[["last_qty"]],
+                hovertemplate=(
+                    "%{x}<br>"
+                    f"{side} @ " + "%{y:.5f}<br>"
+                    "qty=%{customdata[0]:,.0f}<extra></extra>"
+                ),
+            ),
+        )
+
+    fig.update_layout(
+        title=f"{bar_type} - Full Catalog Bars with Fills",
+        template="plotly_white",
+        height=900,
+        hovermode="x unified",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
+        margin={"l": 40, "r": 25, "t": 80, "b": 40},
+        xaxis={"rangeslider": {"visible": True}, "title": "Time"},
+        yaxis={"title": "Price", "fixedrange": False},
+    )
+    fig.write_html(str(output_path))
+    return str(output_path)
+
+
+def lightweight_charts_bundle() -> str:
+    project_root = Path(__file__).resolve().parents[2]
+    bundle_path = (
+        project_root
+        / "node_modules"
+        / "lightweight-charts"
+        / "dist"
+        / "lightweight-charts.standalone.production.js"
+    )
+    if not bundle_path.exists():
+        raise RuntimeError(
+            "Lightweight Charts bundle not found. Run `npm install` from the project root.",
+        )
+    return bundle_path.read_text(encoding="utf-8")
+
+
+def write_lightweight_bars_with_fills_chart(
+    *,
+    catalog: Path,
+    report_dir: Path,
+    instrument_id: str,
+    bar_type: str,
+    start: str,
+    end: str,
+    fills: pd.DataFrame | None,
+) -> str:
+    bars = bars_frame_from_catalog(catalog, bar_type, start, end)
+    fill_points = aggregate_fills(fills, instrument_id)
+    output_path = report_dir / "bars_with_fills_lwc.html"
+
+    candle_data = [
+        {
+            "time": int(row.ts_init.timestamp()),
+            "open": round(float(row.open), 5),
+            "high": round(float(row.high), 5),
+            "low": round(float(row.low), 5),
+            "close": round(float(row.close), 5),
+        }
+        for row in bars.itertuples(index=False)
+    ]
+    marker_data = [
+        {
+            "time": int(row.ts_init.timestamp()),
+            "position": "atPriceMiddle",
+            "price": round(float(row.last_px), 5),
+            "color": "#178f45" if str(row.order_side).upper() == "BUY" else "#c83232",
+            "shape": "arrowUp" if str(row.order_side).upper() == "BUY" else "arrowDown",
+            "text": f"{str(row.order_side).upper()} {float(row.last_px):.5f}",
+            "size": 1.4,
+        }
+        for row in fill_points.itertuples(index=False)
+    ]
+    stats = {
+        "barCount": len(candle_data),
+        "fillCount": len(marker_data),
+        "start": str(bars["ts_init"].min()),
+        "end": str(bars["ts_init"].max()),
+    }
+    bundle = lightweight_charts_bundle()
+
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{bar_type} - Lightweight Bars with Fills</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --bg: #f7f8fb;
+      --panel: #ffffff;
+      --ink: #14213d;
+      --muted: #687387;
+      --line: #d8deea;
+      --button: #eef2f8;
+      --button-hover: #dfe7f3;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Arial, Helvetica, sans-serif;
+    }}
+    header {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }}
+    h1 {{
+      margin: 0;
+      font-size: 18px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }}
+    .meta {{
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .toolbar {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }}
+    button {{
+      min-width: 44px;
+      height: 32px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--button);
+      color: var(--ink);
+      cursor: pointer;
+      font-size: 13px;
+    }}
+    button:hover {{ background: var(--button-hover); }}
+    #chart {{
+      width: 100vw;
+      height: calc(100vh - 70px);
+    }}
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>{bar_type} - Lightweight Bars with Fills</h1>
+      <div class="meta">{stats["barCount"]:,} bars, {stats["fillCount"]:,} fills | {stats["start"]} to {stats["end"]}</div>
+    </div>
+    <div class="toolbar">
+      <button id="range-3m" type="button">3M</button>
+      <button id="range-6m" type="button">6M</button>
+      <button id="range-1y" type="button">1Y</button>
+      <button id="range-all" type="button">All</button>
+    </div>
+  </header>
+  <main id="chart"></main>
+  <script>
+{bundle}
+  </script>
+  <script>
+    const candleData = {json.dumps(candle_data, separators=(",", ":"))};
+    const markerData = {json.dumps(marker_data, separators=(",", ":"))};
+
+    const container = document.getElementById("chart");
+    const chart = LightweightCharts.createChart(container, {{
+      autoSize: true,
+      layout: {{
+        background: {{ type: "solid", color: "#ffffff" }},
+        textColor: "#14213d",
+        fontFamily: "Arial, Helvetica, sans-serif",
+      }},
+      grid: {{
+        vertLines: {{ color: "#edf1f7" }},
+        horzLines: {{ color: "#edf1f7" }},
+      }},
+      rightPriceScale: {{
+        borderColor: "#d8deea",
+        scaleMargins: {{ top: 0.08, bottom: 0.08 }},
+      }},
+      timeScale: {{
+        borderColor: "#d8deea",
+        timeVisible: true,
+        secondsVisible: false,
+        rightOffset: 8,
+        barSpacing: 6,
+      }},
+      crosshair: {{
+        mode: LightweightCharts.CrosshairMode.Normal,
+      }},
+      localization: {{
+        priceFormatter: price => price.toFixed(5),
+      }},
+    }});
+
+    const candleSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {{
+      upColor: "#178f45",
+      downColor: "#c83232",
+      borderUpColor: "#178f45",
+      borderDownColor: "#c83232",
+      wickUpColor: "#178f45",
+      wickDownColor: "#c83232",
+      priceFormat: {{ type: "price", precision: 5, minMove: 0.00001 }},
+    }});
+    candleSeries.setData(candleData);
+    LightweightCharts.createSeriesMarkers(candleSeries, markerData, {{ zOrder: "top" }});
+
+    function visibleRange(months) {{
+      if (!candleData.length) return;
+      const last = candleData[candleData.length - 1].time;
+      const first = Math.max(candleData[0].time, last - months * 30 * 24 * 60 * 60);
+      chart.timeScale().setVisibleRange({{ from: first, to: last }});
+    }}
+
+    document.getElementById("range-3m").addEventListener("click", () => visibleRange(3));
+    document.getElementById("range-6m").addEventListener("click", () => visibleRange(6));
+    document.getElementById("range-1y").addEventListener("click", () => visibleRange(12));
+    document.getElementById("range-all").addEventListener("click", () => chart.timeScale().fitContent());
+
+    visibleRange(6);
+  </script>
+</body>
+</html>
+"""
+    output_path.write_text(html, encoding="utf-8")
+    return str(output_path)
+
+
+def write_visualizations(
+    engine: Any,
+    report_dir: Path,
+    catalog: Path,
+    instrument_id: str,
+    bar_type: str,
+    start: str,
+    end: str,
+    fills: pd.DataFrame | None,
+) -> dict[str, str]:
+    tearsheet_path = report_dir / "tearsheet.html"
+
+    create_tearsheet(
+        engine=engine,
+        output_path=str(tearsheet_path),
+        title="Regime Adaptive FX Backtest",
+    )
+    bars_with_fills_path = write_bars_with_fills_chart(
+        catalog=catalog,
+        report_dir=report_dir,
+        instrument_id=instrument_id,
+        bar_type=bar_type,
+        start=start,
+        end=end,
+        fills=fills,
+    )
+    lightweight_bars_with_fills_path = write_lightweight_bars_with_fills_chart(
+        catalog=catalog,
+        report_dir=report_dir,
+        instrument_id=instrument_id,
+        bar_type=bar_type,
+        start=start,
+        end=end,
+        fills=fills,
+    )
+
+    return {
+        "tearsheet": str(tearsheet_path),
+        "bars_with_fills": bars_with_fills_path,
+        "bars_with_fills_lwc": lightweight_bars_with_fills_path,
+    }
+
+
 def run_regime_backtest(
     *,
     catalog: Path,
@@ -395,6 +768,9 @@ def run_regime_backtest(
             "positions": str(report_dir / "positions.csv"),
             "account": str(report_dir / "account.csv"),
             "log": str(report_dir / "nautilus_backtest.log"),
+            "tearsheet": str(report_dir / "tearsheet.html"),
+            "bars_with_fills": str(report_dir / "bars_with_fills.html"),
+            "bars_with_fills_lwc": str(report_dir / "bars_with_fills_lwc.html"),
         },
     }
 
@@ -403,6 +779,21 @@ def run_regime_backtest(
         write_report(fills, report_dir / "fills.csv")
         write_report(positions, report_dir / "positions.csv")
         write_report(account, report_dir / "account.csv")
+        try:
+            summary["reports"].update(
+                write_visualizations(
+                    engine=engine,
+                    report_dir=report_dir,
+                    catalog=catalog,
+                    instrument_id=instrument_id,
+                    bar_type=bar_type,
+                    start=start,
+                    end=end,
+                    fills=fills,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            summary["visualization_error"] = str(exc)
         (report_dir / "summary.json").write_text(
             json.dumps(summary, indent=2, allow_nan=True),
             encoding="utf-8",
