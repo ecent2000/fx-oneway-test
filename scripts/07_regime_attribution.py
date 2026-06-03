@@ -32,19 +32,6 @@ from fx_factor.strategies.regime_adaptive_fx import REGIME_WIDE_BULL  # noqa: E4
 from fx_factor.strategies.regime_adaptive_fx import REGIME_WIDE_RANGE  # noqa: E402
 
 
-SPLITS = {
-    "2023_train_opt": ("2023-01-01T00:00:00Z", "2023-07-01T00:00:00Z"),
-    "2023_validation": ("2023-07-01T00:00:00Z", "2023-10-01T00:00:00Z"),
-    "2023_final_test": ("2023-10-01T00:00:00Z", "2024-01-01T00:00:00Z"),
-    "2024_train_opt": ("2024-01-01T00:00:00Z", "2024-07-01T00:00:00Z"),
-    "2024_validation": ("2024-07-01T00:00:00Z", "2024-10-01T00:00:00Z"),
-    "2024_final_test": ("2024-10-01T00:00:00Z", "2025-01-01T00:00:00Z"),
-    "2025_train_opt": ("2025-01-01T00:00:00Z", "2025-07-01T00:00:00Z"),
-    "2025_validation": ("2025-07-01T00:00:00Z", "2025-10-01T00:00:00Z"),
-    "2025_final_test": ("2025-10-01T00:00:00Z", "2026-01-01T00:00:00Z"),
-}
-
-
 def parse_bool(value: object) -> bool:
     if isinstance(value, bool):
         return value

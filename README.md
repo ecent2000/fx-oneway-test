@@ -18,11 +18,11 @@ docs/regime_adaptive_fx_timing.md
 src/fx_factor/strategies/regime_adaptive_fx.py
 src/fx_factor/regime_backtest_runner.py
 scripts/02_regime_backtest.py
-scripts/03d_regime_filter_scan.py
+scripts/03e_regime_balanced_scan.py
 scripts/04_regime_validate_oos.py
-scripts/06_regime_stress_test.py
 scripts/07_regime_attribution.py
 scripts/08_visualize_backtest.py
+scripts/09_visualize_market_regimes.py
 mt5/RegimeAdaptiveFxTimingEA.mq5
 ```
 
