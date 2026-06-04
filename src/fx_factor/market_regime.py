@@ -32,29 +32,29 @@ ALL_MARKET_REGIMES = frozenset(
 
 @dataclass(frozen=True)
 class MarketRegimeParams:
-    atr_lookback: int = 48
-    trend_windows: tuple[int, int, int] = (32, 96, 288)
-    donchian_lookback: int = 96
-    volatility_lookback: int = 96
-    percentile_lookback: int = 288
-    ema_fast: int = 32
-    ema_slow: int = 96
-    momentum_lookback: int = 32
-    direction_balance_lookback: int = 48
-    quality_lookback: int = 96
-    confirm_bars: int = 4
-    uncertain_hold_bars: int = 8
+    atr_lookback: int = 24
+    trend_windows: tuple[int, int, int] = (16, 48, 96)
+    donchian_lookback: int = 48
+    volatility_lookback: int = 48
+    percentile_lookback: int = 144
+    ema_fast: int = 16
+    ema_slow: int = 48
+    momentum_lookback: int = 16
+    direction_balance_lookback: int = 24
+    quality_lookback: int = 48
+    confirm_bars: int = 3
+    uncertain_hold_bars: int = 5
     trend_enter_threshold: float = 0.34
     trend_exit_threshold: float = 0.20
     min_trend_quality: float = 0.20
     min_confidence: float = 0.12
     wide_width_threshold: float = 0.56
-    boundary_ewma_span: int = 96
-    boundary_cusum_drift: float = 0.08
-    boundary_cusum_threshold: float = 0.55
-    boundary_min_gap_bars: int = 8
-    hindsight_smooth_bars: int = 32
-    hindsight_min_segment_bars: int = 12
+    boundary_ewma_span: int = 48
+    boundary_cusum_drift: float = 0.06
+    boundary_cusum_threshold: float = 0.42
+    boundary_min_gap_bars: int = 4
+    hindsight_smooth_bars: int = 16
+    hindsight_min_segment_bars: int = 6
 
     @property
     def warmup_bars(self) -> int:

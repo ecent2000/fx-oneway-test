@@ -11,9 +11,9 @@ instrument_id = EUR/USD.SIM
 bar_type = EUR/USD.SIM-15-MINUTE-MID-EXTERNAL
 trade_direction = long_short
 strict_long_filter = false
-confirm_bars = 4
-long_confirm_bars = 4
-short_confirm_bars = 4
+confirm_bars = 3
+long_confirm_bars = 3
+short_confirm_bars = 3
 cooldown_bars = 4
 min_regime_bars = 2
 long_enabled_regimes = wide_bull
@@ -36,15 +36,25 @@ The legacy `disabled_entry_regimes`, `entry_hours_utc`, `min_target_atr_mult`, `
 Core factor windows:
 
 ```text
-channel_lookback = 96
-atr_lookback = 48
-trend_lookback = 96
-momentum_lookback = 24
-breakout_lookback = 48
-short_ma_lookback = 16
+channel_lookback = 48
+atr_lookback = 24
+trend_lookback = 48
+momentum_lookback = 12
+breakout_lookback = 24
+short_ma_lookback = 8
 ```
 
-These are calibrated for 15-minute bars. `channel_lookback` and `trend_lookback` cover roughly one trading day, while `atr_lookback` and `breakout_lookback` cover about half a day.
+These are calibrated for 15-minute bars and biased toward intraday short-term trading. `channel_lookback` and `trend_lookback` now cover roughly 12 hours, while `atr_lookback` and `breakout_lookback` cover roughly 6 hours. This makes the market-background filter react to London, New York, and overlap-session structure sooner than the older one-day windows.
+
+Offline market-structure research is also tuned finer by default:
+
+```text
+segmentation_min_segment_bars = 12
+segmentation_feature_windows = 16-32 bars
+segmentation_pelt_penalty = 6.0
+```
+
+On 15-minute bars this targets roughly 3-hour minimum segments instead of the previous 16-hour floor. The intent is to expose intraday background changes without collapsing every small swing into a new market context.
 
 Regime thresholds:
 
@@ -100,9 +110,9 @@ wide_range shorts:  38 trades, PnL -82.28,  win_rate 39.47%, PF 0.97
 
 The new default disables `wide_range` shorts and keeps `wide_bear` shorts only. This avoids carrying a weak range-short sleeve into the balanced version.
 
-## Latest Validation Snapshot
+## Historical Validation Snapshot
 
-Latest 9 split validation for the current defaults:
+The following 9 split validation snapshot is from the previous, coarser background defaults (`channel_lookback=96`, `trend_lookback=96`, `confirm_bars=4`). Re-run validation after changing the intraday background granularity before treating these numbers as current:
 
 ```text
 2023_train_opt:     +1663.74, 16 trades, WR 81.25%, PF 3.871

@@ -69,6 +69,19 @@ def feature_frame(
 class MarketRegimeTest(unittest.TestCase):
     def setUp(self) -> None:
         self.params = MarketRegimeParams(
+            atr_lookback=48,
+            trend_windows=(32, 96, 288),
+            donchian_lookback=96,
+            volatility_lookback=96,
+            percentile_lookback=288,
+            ema_fast=32,
+            ema_slow=96,
+            momentum_lookback=32,
+            direction_balance_lookback=48,
+            quality_lookback=96,
+            boundary_ewma_span=96,
+            hindsight_smooth_bars=32,
+            hindsight_min_segment_bars=12,
             trend_enter_threshold=0.26,
             trend_exit_threshold=0.16,
             min_trend_quality=0.12,

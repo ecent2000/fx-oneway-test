@@ -34,15 +34,15 @@ class RegimeAdaptiveFxConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
     bar_type: BarType
     trade_size: Decimal
-    channel_lookback: PositiveInt = 96
-    atr_lookback: PositiveInt = 48
-    trend_lookback: PositiveInt = 96
-    momentum_lookback: PositiveInt = 24
-    breakout_lookback: PositiveInt = 48
-    short_ma_lookback: PositiveInt = 16
-    confirm_bars: PositiveInt = 4
-    long_confirm_bars: int = 4
-    short_confirm_bars: int = 4
+    channel_lookback: PositiveInt = 48
+    atr_lookback: PositiveInt = 24
+    trend_lookback: PositiveInt = 48
+    momentum_lookback: PositiveInt = 12
+    breakout_lookback: PositiveInt = 24
+    short_ma_lookback: PositiveInt = 8
+    confirm_bars: PositiveInt = 3
+    long_confirm_bars: int = 3
+    short_confirm_bars: int = 3
     bull_threshold: PositiveFloat = 0.03
     bear_threshold: PositiveFloat = 0.03
     flat_threshold: PositiveFloat = 0.01

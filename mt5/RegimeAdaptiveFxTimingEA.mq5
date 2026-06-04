@@ -23,15 +23,15 @@ enum ENUM_MARKET_REGIME
 
 input string                 InpSymbol = "";
 input ENUM_TIMEFRAMES        InpTimeframe = PERIOD_M15;
-input int                    InpChannelLookback = 96;
-input int                    InpAtrLookback = 48;
-input int                    InpTrendLookback = 96;
-input int                    InpMomentumLookback = 24;
-input int                    InpBreakoutLookback = 48;
-input int                    InpShortMaLookback = 16;
-input int                    InpConfirmBars = 4;
-input int                    InpLongConfirmBars = 4;
-input int                    InpShortConfirmBars = 4;
+input int                    InpChannelLookback = 48;
+input int                    InpAtrLookback = 24;
+input int                    InpTrendLookback = 48;
+input int                    InpMomentumLookback = 12;
+input int                    InpBreakoutLookback = 24;
+input int                    InpShortMaLookback = 8;
+input int                    InpConfirmBars = 3;
+input int                    InpLongConfirmBars = 3;
+input int                    InpShortConfirmBars = 3;
 input double                 InpBullThreshold = 0.03;
 input double                 InpBearThreshold = 0.03;
 input double                 InpFlatThreshold = 0.01;
