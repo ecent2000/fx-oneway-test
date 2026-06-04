@@ -14,10 +14,13 @@ if str(SRC_ROOT) not in sys.path:
 
 from fx_factor.market_segmentation import MarketSegmentationParams
 from fx_factor.market_segmentation import compute_market_segmentation
+from fx_factor.market_segmentation import compute_online_market_segmentation
 from fx_factor.market_segmentation import compute_segmentation_features
+from fx_factor.market_segmentation_eval import OnlineSegmentationAccuracyParams
 from fx_factor.market_segmentation_eval import SegmentationEvalParams
 from fx_factor.market_segmentation_eval import evaluate_market_segmentation
 from fx_factor.market_segmentation_eval import evaluate_market_segmentations
+from fx_factor.market_segmentation_eval import evaluate_online_segmentation_accuracy
 from fx_factor.market_segmentation_eval import segment_summary
 
 
@@ -110,6 +113,69 @@ class MarketSegmentationTest(unittest.TestCase):
         )
         self.assertEqual(len(summary), int(metrics["segment_count"]))
         self.assertIn("log_return_sum", summary.columns)
+
+    def test_online_zigzag_segmentation_outputs_causal_columns(self) -> None:
+        online = compute_online_market_segmentation(self.bars, params=self.params)
+        expected = {
+            "online_segment_id",
+            "online_is_boundary",
+            "online_is_confirmed_boundary",
+            "online_boundary_index",
+            "online_confirm_index",
+            "online_boundary_time",
+            "online_confirm_time",
+            "online_confirmation_lag_bars",
+            "online_segment_age",
+            "online_segment_length_so_far",
+        }
+        self.assertTrue(expected.issubset(online.columns))
+        self.assertEqual(len(online), len(self.bars))
+        self.assertEqual(set(online["segment_method"]), {"online_zigzag"})
+        self.assertGreaterEqual(int(online["online_is_boundary"].sum()), 1)
+        confirmed = online.loc[online["online_is_confirmed_boundary"]]
+        self.assertFalse(confirmed.empty)
+        self.assertTrue((confirmed["online_confirm_index"] >= confirmed["online_boundary_index"]).all())
+        self.assertTrue((confirmed["online_confirmation_lag_bars"] >= 0.0).all())
+
+    def test_online_accuracy_matches_hindsight_pivot_boundaries(self) -> None:
+        hindsight = compute_market_segmentation(self.bars, params=self.params)
+        online = compute_online_market_segmentation(self.bars, params=self.params)
+        accuracy = evaluate_online_segmentation_accuracy(
+            hindsight=hindsight,
+            online=online,
+            params=OnlineSegmentationAccuracyParams(
+                min_segment_bars=self.params.min_segment_bars,
+                tolerance_windows=(0, 1, 6),
+            ),
+        )
+        row = accuracy.loc[accuracy["tolerance_bars"] == 0].iloc[0]
+        self.assertEqual(int(row["matched_boundary_count"]), int(hindsight["is_boundary"].sum()))
+        self.assertAlmostEqual(float(row["precision"]), 1.0)
+        self.assertAlmostEqual(float(row["recall"]), 1.0)
+        self.assertAlmostEqual(float(row["f1"]), 1.0)
+        self.assertGreaterEqual(float(row["median_confirmation_lag_bars"]), 0.0)
+
+    def test_online_outputs_do_not_change_when_future_is_removed(self) -> None:
+        full = compute_online_market_segmentation(self.bars, params=self.params)
+        columns = [
+            "online_segment_id",
+            "online_is_boundary",
+            "online_is_confirmed_boundary",
+            "online_boundary_index",
+            "online_confirm_index",
+            "online_confirmation_lag_bars",
+        ]
+        for cutoff in (260, 390, 520, 650):
+            truncated = compute_online_market_segmentation(self.bars.iloc[: cutoff + 1], params=self.params)
+            confirmed_positions = np.flatnonzero(truncated["online_is_confirmed_boundary"].to_numpy(dtype=bool))
+            if confirmed_positions.size == 0:
+                continue
+            last_confirmed = int(confirmed_positions[-1])
+            pd.testing.assert_frame_equal(
+                full.loc[:last_confirmed, columns].reset_index(drop=True),
+                truncated.loc[:last_confirmed, columns].reset_index(drop=True),
+                check_dtype=False,
+            )
 
 
 if __name__ == "__main__":

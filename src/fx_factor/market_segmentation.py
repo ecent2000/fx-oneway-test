@@ -48,8 +48,10 @@ class MarketSegmentationParams:
 def compute_segmentation_features(
     bars: pd.DataFrame,
     params: MarketSegmentationParams | None = None,
+    *,
+    causal: bool = False,
 ) -> pd.DataFrame:
-    """Compute non-causal ZigZag segmentation features from OHLC bars."""
+    """Compute ZigZag segmentation features from OHLC bars."""
 
     config = params or MarketSegmentationParams()
     frame = _normalize_bars(bars)
@@ -125,7 +127,7 @@ def compute_segmentation_features(
         features.loc[:, smooth_columns] = features.loc[:, smooth_columns].rolling(
             config.feature_smooth_bars,
             min_periods=1,
-            center=True,
+            center=not causal,
         ).median()
     return features
 
@@ -153,6 +155,37 @@ def compute_market_segmentation(
     boundaries = _filter_min_gap(sorted(set(boundaries)), n, config.min_segment_bars)
     scores = _boundary_scores(features, boundaries, feature_columns, config)
     return _attach_segments(features, boundaries, scores, config)
+
+
+def compute_online_market_segmentation(
+    bars: pd.DataFrame,
+    params: MarketSegmentationParams | None = None,
+    feature_columns: tuple[str, ...] = DEFAULT_FEATURE_COLUMNS,
+) -> pd.DataFrame:
+    """Return a causal online ZigZag market-structure segmentation for OHLC bars."""
+
+    config = params or MarketSegmentationParams()
+    features = compute_segmentation_features(bars, config, causal=True)
+    n = len(features)
+    if n == 0:
+        return _attach_online_segments(features, [], [], np.zeros(0, dtype=float), config)
+
+    valid = features.loc[:, ["atr", "close"]].replace([np.inf, -np.inf], np.nan).notna().all(axis=1).to_numpy()
+    valid_positions = np.flatnonzero(valid)
+    if len(valid_positions) < max(config.min_segment_bars * 2, 8):
+        return _attach_online_segments(features, [], [], np.zeros(n, dtype=float), config)
+
+    local_boundaries, local_confirms = _online_zigzag_boundaries(features.iloc[valid_positions].reset_index(drop=True), config)
+    boundary_pairs = [
+        (int(valid_positions[boundary]), int(valid_positions[confirm]))
+        for boundary, confirm in zip(local_boundaries, local_confirms)
+        if 0 < boundary < len(valid_positions) and 0 <= confirm < len(valid_positions)
+    ]
+    boundaries = [boundary for boundary, _ in boundary_pairs]
+    confirms = [confirm for _, confirm in boundary_pairs]
+    boundaries, confirms = _filter_min_gap_with_confirms(boundaries, confirms, n, config.min_segment_bars)
+    scores = _boundary_scores(features, boundaries, feature_columns, config)
+    return _attach_online_segments(features, boundaries, confirms, scores, config)
 
 
 def _normalize_bars(bars: pd.DataFrame) -> pd.DataFrame:
@@ -246,6 +279,59 @@ def _zigzag_boundaries(features: pd.DataFrame, params: MarketSegmentationParams)
     return boundaries
 
 
+def _online_zigzag_boundaries(features: pd.DataFrame, params: MarketSegmentationParams) -> tuple[list[int], list[int]]:
+    close = features["close"].to_numpy(dtype=np.float64)
+    atr = features["atr"].to_numpy(dtype=np.float64)
+    if close.size < params.min_segment_bars * 2:
+        return [], []
+
+    boundaries: list[int] = []
+    confirms: list[int] = []
+    pivot_index = 0
+    pivot_price = close[0]
+    direction = 0
+    extreme_index = 0
+    extreme_price = close[0]
+    for index in range(1, close.size):
+        price = close[index]
+        threshold = max(
+            float(params.zigzag_min_return) * max(abs(pivot_price), 1e-12),
+            float(params.zigzag_atr_multiple) * (atr[index] if np.isfinite(atr[index]) else 0.0),
+        )
+        if direction >= 0 and price >= extreme_price:
+            extreme_price = price
+            extreme_index = index
+        if direction <= 0 and price <= extreme_price:
+            extreme_price = price
+            extreme_index = index
+
+        move = price - pivot_price
+        if direction == 0 and abs(move) >= threshold:
+            direction = 1 if move > 0.0 else -1
+            extreme_price = price
+            extreme_index = index
+            continue
+        if direction > 0 and extreme_price - price >= threshold:
+            if extreme_index - pivot_index >= params.min_segment_bars:
+                boundaries.append(extreme_index)
+                confirms.append(index)
+                pivot_index = extreme_index
+                pivot_price = extreme_price
+            direction = -1
+            extreme_price = price
+            extreme_index = index
+        elif direction < 0 and price - extreme_price >= threshold:
+            if extreme_index - pivot_index >= params.min_segment_bars:
+                boundaries.append(extreme_index)
+                confirms.append(index)
+                pivot_index = extreme_index
+                pivot_price = extreme_price
+            direction = 1
+            extreme_price = price
+            extreme_index = index
+    return boundaries, confirms
+
+
 def _attach_segments(
     features: pd.DataFrame,
     boundaries: list[int],
@@ -287,6 +373,61 @@ def _attach_segments(
     return result
 
 
+def _attach_online_segments(
+    features: pd.DataFrame,
+    boundaries: list[int],
+    confirms: list[int],
+    boundary_scores: np.ndarray,
+    params: MarketSegmentationParams,
+) -> pd.DataFrame:
+    result = _attach_segments(features, boundaries, boundary_scores, params)
+    n = len(result)
+    result["segment_method"] = "online_zigzag"
+    result = result.rename(
+        columns={
+            "segment_id": "online_segment_id",
+            "is_boundary": "online_is_boundary",
+            "segment_start": "online_segment_start",
+            "segment_end": "online_segment_end",
+            "segment_age": "online_segment_age",
+            "segment_length": "online_segment_length",
+        },
+    )
+    confirmed = np.zeros(n, dtype=bool)
+    boundary_time = np.full(n, pd.NaT, dtype=object)
+    confirm_time = np.full(n, pd.NaT, dtype=object)
+    lag_bars = np.full(n, np.nan, dtype=np.float64)
+    boundary_index = np.full(n, -1, dtype=int)
+    confirm_index = np.full(n, -1, dtype=int)
+    timestamps = result["timestamp"].to_numpy()
+    for boundary, confirm in zip(boundaries, confirms):
+        if boundary < 0 or boundary >= n or confirm < 0 or confirm >= n:
+            continue
+        confirmed[confirm] = True
+        boundary_time[confirm] = timestamps[boundary]
+        confirm_time[confirm] = timestamps[confirm]
+        lag_bars[confirm] = float(confirm - boundary)
+        boundary_index[confirm] = int(boundary)
+        confirm_index[confirm] = int(confirm)
+
+    result["online_is_confirmed_boundary"] = confirmed
+    result["online_boundary_index"] = boundary_index
+    result["online_confirm_index"] = confirm_index
+    result["online_boundary_time"] = boundary_time
+    result["online_confirm_time"] = confirm_time
+    result["online_confirmation_lag_bars"] = lag_bars
+    result["online_segment_length_so_far"] = result["online_segment_age"] + 1
+
+    # Keep the shared segmentation schema available for existing summaries and scorers.
+    result["segment_id"] = result["online_segment_id"]
+    result["is_boundary"] = result["online_is_boundary"]
+    result["segment_start"] = result["online_segment_start"]
+    result["segment_end"] = result["online_segment_end"]
+    result["segment_age"] = result["online_segment_age"]
+    result["segment_length"] = result["online_segment_length"]
+    return result
+
+
 def _boundary_scores(
     features: pd.DataFrame,
     boundaries: list[int],
@@ -322,6 +463,26 @@ def _filter_min_gap(boundaries: list[int], n: int, min_gap: int) -> list[int]:
             continue
         filtered.append(int(boundary))
     return filtered
+
+
+def _filter_min_gap_with_confirms(
+    boundaries: list[int],
+    confirms: list[int],
+    n: int,
+    min_gap: int,
+) -> tuple[list[int], list[int]]:
+    filtered_boundaries: list[int] = []
+    filtered_confirms: list[int] = []
+    for boundary, confirm in sorted(zip(boundaries, confirms), key=lambda item: item[0]):
+        if boundary <= 0 or boundary >= n:
+            continue
+        if boundary < min_gap or n - boundary < min_gap:
+            continue
+        if filtered_boundaries and boundary - filtered_boundaries[-1] < min_gap:
+            continue
+        filtered_boundaries.append(int(boundary))
+        filtered_confirms.append(int(confirm))
+    return filtered_boundaries, filtered_confirms
 
 
 def _regression_slope(values: np.ndarray) -> float:

@@ -16,6 +16,13 @@ class SegmentationEvalParams:
     feature_columns: tuple[str, ...] = DEFAULT_FEATURE_COLUMNS
 
 
+@dataclass(frozen=True)
+class OnlineSegmentationAccuracyParams:
+    min_segment_bars: int = 12
+    tolerance_windows: tuple[int, ...] = (0, 1, 3, 6, 12, 24)
+    confirmation_mode: str = "pivot"
+
+
 def evaluate_market_segmentation(
     segmentation: pd.DataFrame,
     params: SegmentationEvalParams | None = None,
@@ -62,6 +69,72 @@ def evaluate_market_segmentations(
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows).sort_values(["quality_score", "between_segment_difference"], ascending=False).reset_index(drop=True)
+
+
+def evaluate_online_segmentation_accuracy(
+    *,
+    hindsight: pd.DataFrame,
+    online: pd.DataFrame,
+    params: OnlineSegmentationAccuracyParams | None = None,
+) -> pd.DataFrame:
+    """Compare causal online boundaries against hindsight boundaries."""
+
+    config = params or OnlineSegmentationAccuracyParams()
+    if config.confirmation_mode != "pivot":
+        raise ValueError("only pivot confirmation_mode is supported")
+    required_hindsight = {"is_boundary"}
+    required_online = {"online_is_boundary", "online_confirmation_lag_bars", "online_segment_id"}
+    missing_hindsight = required_hindsight - set(hindsight.columns)
+    missing_online = required_online - set(online.columns)
+    if missing_hindsight:
+        raise ValueError(f"hindsight segmentation is missing columns: {sorted(missing_hindsight)}")
+    if missing_online:
+        raise ValueError(f"online segmentation is missing columns: {sorted(missing_online)}")
+    if len(hindsight) != len(online):
+        raise ValueError("hindsight and online segmentations must have the same length")
+
+    truth = np.flatnonzero(hindsight["is_boundary"].fillna(False).to_numpy(dtype=bool))
+    predicted = np.flatnonzero(online["online_is_boundary"].fillna(False).to_numpy(dtype=bool))
+    lags = pd.to_numeric(online["online_confirmation_lag_bars"], errors="coerce").dropna().to_numpy(dtype=np.float64)
+    segment_lengths = online.groupby("online_segment_id", sort=True).size().to_numpy(dtype=np.float64)
+    online_avg = _safe_mean(segment_lengths)
+    hindsight_lengths = hindsight.groupby("segment_id", sort=True).size().to_numpy(dtype=np.float64)
+    hindsight_avg = _safe_mean(hindsight_lengths)
+    avg_diff_ratio = abs(online_avg - hindsight_avg) / hindsight_avg if hindsight_avg > 0.0 else 0.0
+
+    rows = []
+    for tolerance in config.tolerance_windows:
+        matched = _match_boundary_count(predicted, truth, int(tolerance))
+        precision = matched / len(predicted) if len(predicted) else 0.0
+        recall = matched / len(truth) if len(truth) else 0.0
+        f1 = 2.0 * precision * recall / (precision + recall) if precision + recall > 0.0 else 0.0
+        rows.append(
+            {
+                "confirmation_mode": config.confirmation_mode,
+                "tolerance_bars": int(tolerance),
+                "hindsight_boundary_count": int(len(truth)),
+                "online_boundary_count": int(len(predicted)),
+                "matched_boundary_count": int(matched),
+                "false_positive_count": int(len(predicted) - matched),
+                "false_negative_count": int(len(truth) - matched),
+                "precision": float(precision),
+                "recall": float(recall),
+                "f1": float(f1),
+                "mean_confirmation_lag_bars": _safe_mean(lags),
+                "median_confirmation_lag_bars": _safe_median(lags),
+                "p90_confirmation_lag_bars": _safe_percentile(lags, 90.0),
+                "lag_le_3_bars_ratio": _safe_mean(lags <= 3.0),
+                "lag_le_6_bars_ratio": _safe_mean(lags <= 6.0),
+                "lag_le_12_bars_ratio": _safe_mean(lags <= 12.0),
+                "online_segment_count": int(segment_lengths.size),
+                "online_average_segment_length": online_avg,
+                "online_median_segment_length": _safe_median(segment_lengths),
+                "hindsight_average_segment_length": hindsight_avg,
+                "average_segment_length_diff_ratio": float(avg_diff_ratio),
+                "online_too_short_segment_ratio": _safe_mean(segment_lengths < config.min_segment_bars),
+            },
+        )
+    return pd.DataFrame(rows)
 
 
 def segment_summary(segmentation: pd.DataFrame) -> pd.DataFrame:
@@ -205,3 +278,26 @@ def _safe_median(values: np.ndarray) -> float:
     if values.size == 0:
         return 0.0
     return float(np.median(values))
+
+
+def _safe_percentile(values: np.ndarray, percentile: float) -> float:
+    values = np.asarray(values, dtype=np.float64)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return 0.0
+    return float(np.percentile(values, percentile))
+
+
+def _match_boundary_count(predicted: np.ndarray, truth: np.ndarray, tolerance: int) -> int:
+    used = np.zeros(len(truth), dtype=bool)
+    matched = 0
+    for boundary in predicted:
+        left = np.searchsorted(truth, int(boundary) - tolerance)
+        right = np.searchsorted(truth, int(boundary) + tolerance, side="right")
+        candidates = [index for index in range(left, right) if not used[index]]
+        if not candidates:
+            continue
+        nearest = min(candidates, key=lambda index: abs(int(truth[index]) - int(boundary)))
+        used[nearest] = True
+        matched += 1
+    return matched

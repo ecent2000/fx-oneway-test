@@ -25,12 +25,27 @@ if str(SRC_ROOT) not in sys.path:
 from fx_factor.market_segmentation import DEFAULT_FEATURE_COLUMNS  # noqa: E402
 from fx_factor.market_segmentation import MarketSegmentationParams  # noqa: E402
 from fx_factor.market_segmentation import compute_market_segmentation  # noqa: E402
+from fx_factor.market_segmentation import compute_online_market_segmentation  # noqa: E402
+from fx_factor.market_segmentation_eval import OnlineSegmentationAccuracyParams  # noqa: E402
 from fx_factor.market_segmentation_eval import SegmentationEvalParams  # noqa: E402
 from fx_factor.market_segmentation_eval import evaluate_market_segmentation  # noqa: E402
+from fx_factor.market_segmentation_eval import evaluate_online_segmentation_accuracy  # noqa: E402
 from fx_factor.market_segmentation_eval import segment_summary  # noqa: E402
 
 
 ZIGZAG_COLOR = "#2f7d55"
+ONLINE_CONFIRM_COLOR = "#9a4d9e"
+
+
+def parse_bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"invalid boolean value: {value}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,6 +58,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-stem", default="market_segmentation_2023_2025")
     parser.add_argument("--months", type=int, default=3)
     parser.add_argument("--min-segment-bars", type=int, default=12)
+    parser.add_argument("--include-online", type=parse_bool, default=True)
+    parser.add_argument("--boundary-match-window-bars", type=int, default=6)
+    parser.add_argument("--online-confirmation-mode", default="pivot", choices=["pivot"])
     return parser.parse_args()
 
 
@@ -111,6 +129,28 @@ def boundary_markers(frame: pd.DataFrame) -> list[dict[str, Any]]:
     return markers
 
 
+def online_confirm_markers(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    if "online_is_confirmed_boundary" not in frame.columns:
+        return []
+    markers: list[dict[str, Any]] = []
+    confirmed = frame.loc[
+        frame["online_is_confirmed_boundary"].fillna(False),
+        ["timestamp", "online_boundary_index", "online_confirmation_lag_bars"],
+    ]
+    for row in confirmed.itertuples(index=False):
+        lag = float(row.online_confirmation_lag_bars)
+        markers.append(
+            {
+                "time": time_seconds(row.timestamp),
+                "position": "belowBar",
+                "color": ONLINE_CONFIRM_COLOR,
+                "shape": "arrowUp",
+                "text": f"C{int(row.online_boundary_index)} +{lag:.0f}",
+            },
+        )
+    return markers
+
+
 def segmented_candle_data(frame: pd.DataFrame) -> list[dict[str, float | int | str]]:
     palette = [
         ("#1f7a57", "#176b4b"),
@@ -145,16 +185,24 @@ def render_method_html(
     segmentation: pd.DataFrame,
     metrics: dict[str, Any],
     initial_months: int,
+    online: pd.DataFrame | None = None,
+    accuracy_rows: list[dict[str, Any]] | None = None,
 ) -> str:
     bundle = lightweight_charts_bundle()
     candles = segmented_candle_data(segmentation)
-    markers = boundary_markers(segmentation)
+    markers = boundary_markers(segmentation) + (online_confirm_markers(online) if online is not None else [])
     summary_rows = segment_summary(segmentation).head(120).to_dict(orient="records")
+    accuracy = accuracy_rows or []
+    primary_accuracy = next(
+        (row for row in accuracy if int(row.get("tolerance_bars", -1)) == 0),
+        accuracy[0] if accuracy else {},
+    )
     payload = {
         "candles": candles,
-        "markers": markers,
+        "markers": sorted(markers, key=lambda item: item["time"]),
         "metrics": metrics,
         "summaryRows": summary_rows,
+        "accuracyRows": accuracy,
     }
     return f"""<!doctype html>
 <html lang="en">
@@ -303,7 +351,9 @@ def render_method_html(
         segments {int(metrics.get("segment_count", 0))} |
         avg length {float(metrics.get("average_segment_length", 0.0)):.1f} |
         stability {float(metrics.get("within_segment_stability", 0.0)):.3f} |
-        between diff {float(metrics.get("between_segment_difference", 0.0)):.3f}
+        between diff {float(metrics.get("between_segment_difference", 0.0)):.3f} |
+        online F1@0 {float(primary_accuracy.get("f1", 0.0)):.3f} |
+        median lag {float(primary_accuracy.get("median_confirmation_lag_bars", 0.0)):.1f}
       </div>
     </div>
     <div class="toolbar">
@@ -318,7 +368,7 @@ def render_method_html(
   </header>
   <main class="dashboard">
     <section class="chart-panel">
-      <div class="pane-title">Price colored by segment_id; circles mark boundaries</div>
+      <div class="pane-title">Price colored by segment_id; circles mark hindsight boundaries; arrows mark online confirmations</div>
       <div id="price-chart" class="chart"></div>
     </section>
     <section class="summary">
@@ -484,6 +534,24 @@ def write_outputs(args: argparse.Namespace) -> tuple[dict[str, Any], Path]:
             feature_columns=DEFAULT_FEATURE_COLUMNS,
         ),
     )
+    online: pd.DataFrame | None = None
+    accuracy: pd.DataFrame | None = None
+    if args.include_online:
+        online = compute_online_market_segmentation(
+            bars,
+            params=params,
+            feature_columns=DEFAULT_FEATURE_COLUMNS,
+        )
+        tolerances = tuple(sorted(set((0, 1, 3, int(args.boundary_match_window_bars), 12, 24))))
+        accuracy = evaluate_online_segmentation_accuracy(
+            hindsight=segmentation,
+            online=online,
+            params=OnlineSegmentationAccuracyParams(
+                min_segment_bars=args.min_segment_bars,
+                tolerance_windows=tolerances,
+                confirmation_mode=args.online_confirmation_mode,
+            ),
+        )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = args.output_dir / f"{args.output_stem}_zigzag.csv"
@@ -491,17 +559,30 @@ def write_outputs(args: argparse.Namespace) -> tuple[dict[str, Any], Path]:
     html_path = args.output_dir / f"{args.output_stem}_zigzag.html"
     evaluation_path = args.output_dir / f"{args.output_stem}_zigzag_evaluation.csv"
     evaluation_json_path = args.output_dir / f"{args.output_stem}_zigzag_evaluation.json"
+    online_csv_path = args.output_dir / f"{args.output_stem}_online_zigzag.csv"
+    online_summary_path = args.output_dir / f"{args.output_stem}_online_zigzag_segments.csv"
+    accuracy_path = args.output_dir / f"{args.output_stem}_online_vs_hindsight_accuracy.csv"
+    accuracy_json_path = args.output_dir / f"{args.output_stem}_online_vs_hindsight_accuracy.json"
 
     segmentation.to_csv(csv_path, index=False)
     segment_summary(segmentation).to_csv(summary_path, index=False)
     pd.DataFrame([metrics]).to_csv(evaluation_path, index=False)
     evaluation_json_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    accuracy_rows: list[dict[str, Any]] = []
+    if online is not None and accuracy is not None:
+        online.to_csv(online_csv_path, index=False)
+        segment_summary(online).to_csv(online_summary_path, index=False)
+        accuracy.to_csv(accuracy_path, index=False)
+        accuracy_rows = accuracy.to_dict(orient="records")
+        accuracy_json_path.write_text(json.dumps(accuracy_rows, indent=2), encoding="utf-8")
     html_path.write_text(
         render_method_html(
             title=f"{args.bar_type} ZigZag market segmentation",
             segmentation=segmentation,
             metrics=metrics,
             initial_months=args.months,
+            online=online,
+            accuracy_rows=accuracy_rows,
         ),
         encoding="utf-8",
     )
@@ -512,6 +593,10 @@ def main() -> None:
     args = parse_args()
     metrics, html_path = write_outputs(args)
     print(pd.DataFrame([metrics]).to_string(index=False))
+    if args.include_online:
+        accuracy_path = args.output_dir / f"{args.output_stem}_online_vs_hindsight_accuracy.csv"
+        if accuracy_path.exists():
+            print(pd.read_csv(accuracy_path).to_string(index=False))
     print(f"html: {html_path}")
 
 
