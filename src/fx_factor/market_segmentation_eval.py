@@ -56,7 +56,7 @@ def evaluate_market_segmentations(
     segmentations: dict[str, pd.DataFrame],
     params: SegmentationEvalParams | None = None,
 ) -> pd.DataFrame:
-    """Evaluate several methods and return a quality-ranked table."""
+    """Evaluate one or more segmentation outputs and return a quality-ranked table."""
 
     rows = [evaluate_market_segmentation(frame, params) for frame in segmentations.values()]
     if not rows:

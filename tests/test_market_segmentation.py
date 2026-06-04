@@ -13,7 +13,6 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from fx_factor.market_segmentation import MarketSegmentationParams
-from fx_factor.market_segmentation import compute_all_market_segmentations
 from fx_factor.market_segmentation import compute_market_segmentation
 from fx_factor.market_segmentation import compute_segmentation_features
 from fx_factor.market_segmentation_eval import SegmentationEvalParams
@@ -55,8 +54,6 @@ class MarketSegmentationTest(unittest.TestCase):
             efficiency_lookback=48,
             adx_lookback=48,
             min_segment_bars=80,
-            pelt_penalty=6.0,
-            binseg_max_segments=5,
         )
 
     def test_features_include_requested_market_structure_columns(self) -> None:
@@ -75,8 +72,8 @@ class MarketSegmentationTest(unittest.TestCase):
         self.assertTrue(expected.issubset(features.columns))
         self.assertEqual(len(features), len(self.bars))
 
-    def test_pelt_segmentation_outputs_unified_columns(self) -> None:
-        segmentation = compute_market_segmentation(self.bars, method="pelt", params=self.params)
+    def test_zigzag_segmentation_outputs_unified_columns(self) -> None:
+        segmentation = compute_market_segmentation(self.bars, params=self.params)
         expected = {
             "segment_id",
             "is_boundary",
@@ -87,26 +84,25 @@ class MarketSegmentationTest(unittest.TestCase):
         }
         self.assertTrue(expected.issubset(segmentation.columns))
         self.assertEqual(len(segmentation), len(self.bars))
+        self.assertEqual(set(segmentation["segment_method"]), {"zigzag"})
         self.assertGreaterEqual(segmentation["segment_id"].nunique(), 2)
         self.assertGreaterEqual(int(segmentation["is_boundary"].sum()), 1)
         self.assertEqual(int(segmentation.groupby("segment_id")["segment_age"].first().max()), 0)
 
-    def test_evaluation_scores_segmentations(self) -> None:
-        segmentations = compute_all_market_segmentations(
-            self.bars,
-            params=self.params,
-            methods=("pelt", "binseg", "cusum", "zigzag", "hmm"),
-        )
-        evaluation = evaluate_market_segmentations(
-            segmentations,
+    def test_evaluation_scores_zigzag_segmentation(self) -> None:
+        segmentation = compute_market_segmentation(self.bars, params=self.params)
+        metrics = evaluate_market_segmentation(
+            segmentation,
             SegmentationEvalParams(min_segment_bars=self.params.min_segment_bars),
         )
-        self.assertEqual(set(evaluation["method"]), set(segmentations))
-        self.assertIn("quality_score", evaluation.columns)
-        self.assertTrue(np.isfinite(evaluation["quality_score"].to_numpy(dtype=np.float64)).all())
+        evaluation = evaluate_market_segmentations({"zigzag": segmentation})
+        self.assertEqual(metrics["method"], "zigzag")
+        self.assertIn("quality_score", metrics)
+        self.assertTrue(np.isfinite(float(metrics["quality_score"])))
+        self.assertEqual(list(evaluation["method"]), ["zigzag"])
 
     def test_segment_summary_is_one_row_per_segment(self) -> None:
-        segmentation = compute_market_segmentation(self.bars, method="binseg", params=self.params)
+        segmentation = compute_market_segmentation(self.bars, params=self.params)
         summary = segment_summary(segmentation)
         metrics = evaluate_market_segmentation(
             segmentation,

@@ -51,7 +51,8 @@ Offline market-structure research is also tuned finer by default:
 ```text
 segmentation_min_segment_bars = 12
 segmentation_feature_windows = 16-32 bars
-segmentation_pelt_penalty = 6.0
+segmentation_zigzag_atr_multiple = 1.3
+segmentation_zigzag_min_return = 0.0005
 ```
 
 On 15-minute bars this targets roughly 3-hour minimum segments instead of the previous 16-hour floor. The intent is to expose intraday background changes without collapsing every small swing into a new market context.

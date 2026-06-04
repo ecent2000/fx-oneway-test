@@ -24,32 +24,25 @@ if str(SRC_ROOT) not in sys.path:
 
 from fx_factor.market_segmentation import DEFAULT_FEATURE_COLUMNS  # noqa: E402
 from fx_factor.market_segmentation import MarketSegmentationParams  # noqa: E402
-from fx_factor.market_segmentation import SegmentationMethod  # noqa: E402
-from fx_factor.market_segmentation import compute_all_market_segmentations  # noqa: E402
+from fx_factor.market_segmentation import compute_market_segmentation  # noqa: E402
 from fx_factor.market_segmentation_eval import SegmentationEvalParams  # noqa: E402
-from fx_factor.market_segmentation_eval import evaluate_market_segmentations  # noqa: E402
+from fx_factor.market_segmentation_eval import evaluate_market_segmentation  # noqa: E402
 from fx_factor.market_segmentation_eval import segment_summary  # noqa: E402
 
 
-METHOD_COLORS = {
-    "pelt": "#235789",
-    "binseg": "#8f3f71",
-    "cusum": "#c46d1d",
-    "zigzag": "#2f7d55",
-    "hmm": "#6f5bb8",
-}
+ZIGZAG_COLOR = "#2f7d55"
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Research offline market-structure segmentation methods.")
+    parser = argparse.ArgumentParser(description="Research offline ZigZag market-structure segmentation.")
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG_PATH)
     parser.add_argument("--bar-type", default=DEFAULT_BAR_TYPE)
     parser.add_argument("--start", default=DEFAULT_START)
     parser.add_argument("--end", default=DEFAULT_END)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_REPORTS_DIR)
     parser.add_argument("--output-stem", default="market_segmentation_2023_2025")
-    parser.add_argument("--methods", nargs="+", default=["pelt", "binseg", "cusum", "zigzag", "hmm"])
     parser.add_argument("--months", type=int, default=3)
     parser.add_argument("--min-segment-bars", type=int, default=12)
-    parser.add_argument("--pelt-penalty", type=float, default=6.0)
     return parser.parse_args()
 
 
@@ -102,8 +95,7 @@ def candle_data(frame: pd.DataFrame) -> list[dict[str, float | int]]:
     ]
 
 
-def boundary_markers(frame: pd.DataFrame, method: str) -> list[dict[str, Any]]:
-    color = METHOD_COLORS.get(method, "#235789")
+def boundary_markers(frame: pd.DataFrame) -> list[dict[str, Any]]:
     markers: list[dict[str, Any]] = []
     boundaries = frame.loc[frame["is_boundary"].fillna(False), ["timestamp", "boundary_score", "segment_id"]]
     for row in boundaries.itertuples(index=False):
@@ -111,7 +103,7 @@ def boundary_markers(frame: pd.DataFrame, method: str) -> list[dict[str, Any]]:
             {
                 "time": time_seconds(row.timestamp),
                 "position": "aboveBar",
-                "color": color,
+                "color": ZIGZAG_COLOR,
                 "shape": "circle",
                 "text": f"S{int(row.segment_id)} {float(row.boundary_score):.2f}",
             },
@@ -150,14 +142,13 @@ def segmented_candle_data(frame: pd.DataFrame) -> list[dict[str, float | int | s
 def render_method_html(
     *,
     title: str,
-    method: str,
     segmentation: pd.DataFrame,
     metrics: dict[str, Any],
     initial_months: int,
 ) -> str:
     bundle = lightweight_charts_bundle()
     candles = segmented_candle_data(segmentation)
-    markers = boundary_markers(segmentation, method)
+    markers = boundary_markers(segmentation)
     summary_rows = segment_summary(segmentation).head(120).to_dict(orient="records")
     payload = {
         "candles": candles,
@@ -165,7 +156,6 @@ def render_method_html(
         "metrics": metrics,
         "summaryRows": summary_rows,
     }
-    color = METHOD_COLORS.get(method, "#235789")
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -180,7 +170,7 @@ def render_method_html(
       --ink: #17202e;
       --muted: #667282;
       --line: #d9e0e8;
-      --accent: {color};
+      --accent: {ZIGZAG_COLOR};
     }}
     * {{ box-sizing: border-box; }}
     html, body {{
@@ -477,101 +467,18 @@ def render_method_html(
 """
 
 
-def render_index_html(title: str, evaluation: pd.DataFrame, html_paths: dict[str, Path]) -> str:
-    rows = []
-    for row in evaluation.itertuples(index=False):
-        method = str(row.method)
-        href = html_paths.get(method, Path(""))
-        rows.append(
-            "<tr>"
-            f"<td><a href=\"{href.name}\">{method}</a></td>"
-            f"<td>{float(row.quality_score):.3f}</td>"
-            f"<td>{int(row.segment_count)}</td>"
-            f"<td>{float(row.average_segment_length):.1f}</td>"
-            f"<td>{float(row.within_segment_stability):.3f}</td>"
-            f"<td>{float(row.between_segment_difference):.3f}</td>"
-            f"<td>{float(row.forward_trend_clarity):.3f}</td>"
-            "</tr>",
-        )
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{title}</title>
-  <style>
-    body {{
-      margin: 0;
-      padding: 24px;
-      background: #f4f6f8;
-      color: #17202e;
-      font-family: Arial, Helvetica, sans-serif;
-    }}
-    h1 {{
-      margin: 0 0 16px;
-      font-size: 22px;
-      letter-spacing: 0;
-    }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-      background: #ffffff;
-      border: 1px solid #d9e0e8;
-    }}
-    th, td {{
-      padding: 9px 10px;
-      border-bottom: 1px solid #d9e0e8;
-      text-align: left;
-      font-size: 13px;
-    }}
-    th {{ color: #667282; font-weight: 650; }}
-    a {{ color: #235789; text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-  </style>
-</head>
-<body>
-  <h1>{title}</h1>
-  <table>
-    <thead>
-      <tr>
-        <th>method</th>
-        <th>quality</th>
-        <th>segments</th>
-        <th>avg length</th>
-        <th>stability</th>
-        <th>between diff</th>
-        <th>trend clarity</th>
-      </tr>
-    </thead>
-    <tbody>
-      {''.join(rows)}
-    </tbody>
-  </table>
-</body>
-</html>
-"""
-
-
-def write_outputs(args: argparse.Namespace) -> tuple[pd.DataFrame, Path]:
-    methods = tuple(str(method).lower() for method in args.methods)
-    allowed = {"pelt", "binseg", "cusum", "zigzag", "hmm"}
-    invalid = set(methods) - allowed
-    if invalid:
-        raise ValueError(f"unknown methods: {sorted(invalid)}")
-
+def write_outputs(args: argparse.Namespace) -> tuple[dict[str, Any], Path]:
     bars = load_bars(args.catalog, args.bar_type, args.start, args.end)
     params = MarketSegmentationParams(
         min_segment_bars=args.min_segment_bars,
-        pelt_penalty=args.pelt_penalty,
     )
-    segmentations = compute_all_market_segmentations(
+    segmentation = compute_market_segmentation(
         bars,
         params=params,
-        methods=methods,  # type: ignore[arg-type]
         feature_columns=DEFAULT_FEATURE_COLUMNS,
     )
-    evaluation = evaluate_market_segmentations(
-        segmentations,
+    metrics = evaluate_market_segmentation(
+        segmentation,
         SegmentationEvalParams(
             min_segment_bars=args.min_segment_bars,
             feature_columns=DEFAULT_FEATURE_COLUMNS,
@@ -579,43 +486,33 @@ def write_outputs(args: argparse.Namespace) -> tuple[pd.DataFrame, Path]:
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    html_paths: dict[str, Path] = {}
-    for method, segmentation in segmentations.items():
-        csv_path = args.output_dir / f"{args.output_stem}_{method}.csv"
-        summary_path = args.output_dir / f"{args.output_stem}_{method}_segments.csv"
-        html_path = args.output_dir / f"{args.output_stem}_{method}.html"
-        segmentation.to_csv(csv_path, index=False)
-        segment_summary(segmentation).to_csv(summary_path, index=False)
-        metrics = evaluation.loc[evaluation["method"] == method].iloc[0].to_dict()
-        html_path.write_text(
-            render_method_html(
-                title=f"{args.bar_type} market segmentation: {method}",
-                method=method,
-                segmentation=segmentation,
-                metrics=metrics,
-                initial_months=args.months,
-            ),
-            encoding="utf-8",
-        )
-        html_paths[method] = html_path
+    csv_path = args.output_dir / f"{args.output_stem}_zigzag.csv"
+    summary_path = args.output_dir / f"{args.output_stem}_zigzag_segments.csv"
+    html_path = args.output_dir / f"{args.output_stem}_zigzag.html"
+    evaluation_path = args.output_dir / f"{args.output_stem}_zigzag_evaluation.csv"
+    evaluation_json_path = args.output_dir / f"{args.output_stem}_zigzag_evaluation.json"
 
-    evaluation_path = args.output_dir / f"{args.output_stem}_evaluation.csv"
-    evaluation_json_path = args.output_dir / f"{args.output_stem}_evaluation.json"
-    index_path = args.output_dir / f"{args.output_stem}_index.html"
-    evaluation.to_csv(evaluation_path, index=False)
-    evaluation_json_path.write_text(json.dumps(evaluation.to_dict(orient="records"), indent=2), encoding="utf-8")
-    index_path.write_text(
-        render_index_html(f"{args.bar_type} market segmentation research", evaluation, html_paths),
+    segmentation.to_csv(csv_path, index=False)
+    segment_summary(segmentation).to_csv(summary_path, index=False)
+    pd.DataFrame([metrics]).to_csv(evaluation_path, index=False)
+    evaluation_json_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    html_path.write_text(
+        render_method_html(
+            title=f"{args.bar_type} ZigZag market segmentation",
+            segmentation=segmentation,
+            metrics=metrics,
+            initial_months=args.months,
+        ),
         encoding="utf-8",
     )
-    return evaluation, index_path
+    return metrics, html_path
 
 
 def main() -> None:
     args = parse_args()
-    evaluation, index_path = write_outputs(args)
-    print(evaluation.to_string(index=False))
-    print(f"index: {index_path}")
+    metrics, html_path = write_outputs(args)
+    print(pd.DataFrame([metrics]).to_string(index=False))
+    print(f"html: {html_path}")
 
 
 if __name__ == "__main__":
